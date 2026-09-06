@@ -7,16 +7,28 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 /**
  * @title PowerballLottery
  * @notice Multi-tier lottery with 5+1 number matching
+ * @dev Prize accounting: each draw's tier pools are funded solely from that
+ *      draw's own pot, and payouts are split in two phases. Winners first
+ *      register their ticket with claimPrize() during the claim window; once
+ *      the window closes the winner count per tier is final, and each winner
+ *      withdraws an equal share of the tier pool with withdrawPrize(). This
+ *      guarantees a draw can never pay out more than its own pot, even with
+ *      multiple winners in a tier or several draws sharing the contract
+ *      balance. Pools of tiers with no registered winners can be recovered by
+ *      the owner after the window via withdrawUnclaimed().
  */
 contract PowerballLottery is ReentrancyGuard, Ownable {
-    
+
     struct Ticket {
         address owner;
+        uint256 drawId;   // Draw this ticket was purchased for
         uint8[5] numbers; // Main numbers: 1-69
         uint8 powerball;  // Powerball: 1-26
-        bool claimed;
+        bool registered;  // Win registered during the claim window
+        bool claimed;     // Prize withdrawn
+        uint8 wonTier;    // Winning tier recorded at registration
     }
-    
+
     struct Draw {
         uint256 drawTime;
         uint8[5] winningNumbers;
@@ -24,12 +36,14 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         uint256 ticketCount;
         uint256 totalPot;
         bool completed;
-        mapping(uint8 => uint256) prizeTiers; // tier => amount
+        mapping(uint8 => uint256) prizeTiers;  // tier => pool amount
+        mapping(uint8 => uint256) tierWinners; // tier => registered winner count
     }
-    
+
     uint256 public ticketPrice = 0.01 ether;
     uint256 public drawInterval = 1 days;
     uint256 public nextDrawTime;
+    uint256 public constant CLAIM_WINDOW = 7 days;
     
     mapping(uint256 => Ticket) public tickets;
     mapping(uint256 => Draw) public draws;
@@ -52,6 +66,12 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         uint256 indexed drawId,
         uint8[5] numbers,
         uint8 powerball
+    );
+    event PrizeRegistered(
+        uint256 indexed drawId,
+        uint256 indexed ticketId,
+        address winner,
+        uint256 tier
     );
     event PrizeClaimed(
         uint256 indexed drawId,
@@ -79,9 +99,12 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         ticketId = ticketCounter++;
         tickets[ticketId] = Ticket({
             owner: msg.sender,
+            drawId: drawCounter,
             numbers: numbers,
             powerball: powerball,
-            claimed: false
+            registered: false,
+            claimed: false,
+            wonTier: 0
         });
         
         uint256 currentDraw = drawCounter;
@@ -117,39 +140,91 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
     }
     
     /**
-     * @notice Claim prize for a winning ticket
+     * @notice Register a winning ticket during the claim window
+     * @dev The ticket must have been purchased for `drawId`; payouts happen
+     *      via withdrawPrize() once the window closes and the winner count
+     *      per tier is final, so a tier pool is never overpaid.
      */
     function claimPrize(uint256 ticketId, uint256 drawId) external nonReentrant {
-        require(draws[drawId].completed, "Draw not complete");
-        
+        Draw storage draw = draws[drawId];
+        require(draw.completed, "Draw not complete");
+        require(block.timestamp <= draw.drawTime + CLAIM_WINDOW, "Claim window closed");
+
+        Ticket storage ticket = tickets[ticketId];
+        require(ticket.drawId == drawId, "Ticket not for this draw");
+        require(ticket.owner == msg.sender, "Not ticket owner");
+        require(!ticket.registered, "Already registered");
+
+        uint8 tier = _checkWinningTier(ticket, draw);
+        require(tier > 0, "Not a winner");
+        require(draw.prizeTiers[tier] > 0, "No prize for tier");
+
+        ticket.registered = true;
+        ticket.wonTier = tier;
+        draw.tierWinners[tier]++;
+
+        emit PrizeRegistered(drawId, ticketId, msg.sender, tier);
+    }
+
+    /**
+     * @notice Withdraw an equal share of the tier pool after the claim window
+     */
+    function withdrawPrize(uint256 ticketId) external nonReentrant {
         Ticket storage ticket = tickets[ticketId];
         require(ticket.owner == msg.sender, "Not ticket owner");
+        require(ticket.registered, "Not registered");
         require(!ticket.claimed, "Already claimed");
-        
-        uint8 tier = _checkWinningTier(ticket, draws[drawId]);
-        require(tier > 0, "Not a winner");
-        
-        uint256 prize = draws[drawId].prizeTiers[tier];
-        require(prize > 0, "No prize for tier");
-        
+
+        Draw storage draw = draws[ticket.drawId];
+        require(block.timestamp > draw.drawTime + CLAIM_WINDOW, "Claim window open");
+
+        uint8 tier = ticket.wonTier;
+        uint256 prize = draw.prizeTiers[tier] / draw.tierWinners[tier];
+
         ticket.claimed = true;
         payable(msg.sender).transfer(prize);
-        
-        emit PrizeClaimed(drawId, msg.sender, tier, prize);
+
+        emit PrizeClaimed(ticket.drawId, msg.sender, tier, prize);
     }
-    
+
+    /**
+     * @notice Recover pools of tiers with no registered winners after the claim window
+     */
+    function withdrawUnclaimed(uint256 drawId) external onlyOwner {
+        Draw storage draw = draws[drawId];
+        require(draw.completed, "Draw not complete");
+        require(block.timestamp > draw.drawTime + CLAIM_WINDOW, "Claim window open");
+
+        uint256 amount;
+        for (uint8 i = 1; i <= 5; i++) {
+            if (draw.tierWinners[i] == 0) {
+                amount += draw.prizeTiers[i];
+                draw.prizeTiers[i] = 0;
+            }
+        }
+        require(amount > 0, "Nothing to withdraw");
+
+        payable(owner()).transfer(amount);
+    }
+
     /**
      * @notice Check if a ticket won
+     * @dev Returns the current per-winner share; the final share is only
+     *      known once the claim window has closed.
      */
-    function checkTicket(uint256 ticketId, uint256 drawId) 
-        external 
-        view 
-        returns (uint8 tier, uint256 prize) 
+    function checkTicket(uint256 ticketId, uint256 drawId)
+        external
+        view
+        returns (uint8 tier, uint256 prize)
     {
         if (!draws[drawId].completed) return (0, 0);
-        
+        if (tickets[ticketId].drawId != drawId) return (0, 0);
+
         tier = _checkWinningTier(tickets[ticketId], draws[drawId]);
-        prize = draws[drawId].prizeTiers[tier];
+        uint256 winners = draws[drawId].tierWinners[tier];
+        prize = winners > 0
+            ? draws[drawId].prizeTiers[tier] / winners
+            : draws[drawId].prizeTiers[tier];
     }
     
     function _validateNumbers(uint8[5] memory numbers, uint8 powerball) 

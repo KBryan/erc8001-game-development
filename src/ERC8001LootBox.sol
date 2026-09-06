@@ -135,6 +135,9 @@ contract ERC8001LootBox {
     /// @notice GameCoordination contract for ERC-8001 operations
     GameCoordination public immutable coordination;
 
+    /// @notice Contract deployer, allowed to configure the loot NFT
+    address public immutable owner;
+
     /// @notice Pyth Entropy contract for verifiable randomness
     IPythEntropy public immutable entropy;
 
@@ -230,6 +233,7 @@ contract ERC8001LootBox {
     error LootBoxAlreadyExists();
     error LootBoxAlreadyOpened();
     error LootBoxAlreadyCancelled();
+    error NotOwner();
     error NotOrganizer();
     error NotParticipant();
     error AlreadyAgreed();
@@ -279,15 +283,17 @@ contract ERC8001LootBox {
         coordination = GameCoordination(_coordination);
         entropy = IPythEntropy(_entropy);
         feeToken = _feeToken;
+        owner = msg.sender;
         nextTokenId = 1;
     }
 
     /**
      * @notice Set the loot NFT contract
-     * @dev Can only be called once
+     * @dev Only the deployer can set it, and only once
      * @param _lootNFT Loot NFT contract address
      */
     function setLootNFT(address _lootNFT) external {
+        if (msg.sender != owner) revert NotOwner();
         if (address(lootNFT) != address(0)) revert InvalidNFTContract();
         if (_lootNFT == address(0)) revert InvalidNFTContract();
         lootNFT = IERC721Loot(_lootNFT);
@@ -388,15 +394,7 @@ contract ERC8001LootBox {
 
         // Collect open fee if required
         if (box.openFee > 0) {
-            (bool xferSuccess, ) = feeToken.call(
-                abi.encodeWithSelector(
-                    bytes4(keccak256("transferFrom(address,address,uint256)")),
-                    msg.sender,
-                    address(this),
-                    box.openFee
-                )
-            );
-            if (!xferSuccess) revert TransferFailed();
+            _safeTransferFrom(feeToken, msg.sender, address(this), box.openFee);
         }
 
         // Accept coordination through ERC-8001
@@ -614,17 +612,11 @@ contract ERC8001LootBox {
         coordination.cancelCoordination(boxId, reason);
 
         // Refund open fees to participants who paid
+        // A failed refund is skipped rather than blocking cancellation
         for (uint256 i = 0; i < box.participants.length; i++) {
             address participant = box.participants[i];
             if (coordination.hasAccepted(boxId, participant) && box.openFee > 0) {
-                (bool xferSuccess, ) = feeToken.call(
-                    abi.encodeWithSelector(
-                        bytes4(keccak256("transfer(address,uint256)")),
-                        participant,
-                        box.openFee
-                    )
-                );
-                if (xferSuccess) {
+                if (_tryTransfer(feeToken, participant, box.openFee)) {
                     emit OpenFeeRefunded(boxId, participant, box.openFee);
                 }
             }
@@ -712,6 +704,38 @@ contract ERC8001LootBox {
      */
     function getParticipantBoxes(address participant) external view returns (bytes32[] memory) {
         return participantBoxes[participant];
+    }
+
+    // ============ Token Transfer Helpers ============
+
+    /**
+     * @notice Transfer tokens from an approved account, reverting on failure
+     * @dev Checks return data because some ERC-20s return false instead of
+     *      reverting, and others (like USDT) return nothing at all
+     */
+    function _safeTransferFrom(address token, address from, address to, uint256 amount) private {
+        (bool success, bytes memory returndata) = token.call(
+            abi.encodeWithSelector(
+                bytes4(keccak256("transferFrom(address,address,uint256)")),
+                from,
+                to,
+                amount
+            )
+        );
+        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
+            revert TransferFailed();
+        }
+    }
+
+    /**
+     * @notice Attempt a token transfer, returning success instead of reverting
+     * @dev Used in refund loops where one failed transfer must not block the rest
+     */
+    function _tryTransfer(address token, address to, uint256 amount) private returns (bool ok) {
+        (bool success, bytes memory returndata) = token.call(
+            abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount)
+        );
+        return success && (returndata.length == 0 || abi.decode(returndata, (bool)));
     }
 
     // ============ Utility Functions ============

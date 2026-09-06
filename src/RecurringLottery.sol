@@ -19,6 +19,7 @@ contract RecurringLottery is
         uint256 startTime;
         uint256 endTime;
         uint256 pot;
+        uint256 ticketsSold; // Tickets actually purchased (pot may also hold rollover)
         address[] participants;
         mapping(address => uint256) tickets;
         address winner;
@@ -81,6 +82,7 @@ contract RecurringLottery is
             round.participants.push(msg.sender);
         }
         round.tickets[msg.sender] += count;
+        round.ticketsSold += count;
         round.pot += msg.value;
         
         emit TicketPurchased(currentRoundId, msg.sender, count);
@@ -134,7 +136,12 @@ contract RecurringLottery is
             roundId
         )));
         
-        uint256 totalTickets = round.pot / config.ticketPrice;
+        // Draw over tickets actually sold, never over the pot: rolled-over
+        // funds inflate the pot without adding tickets, and dividing the pot
+        // by the ticket price would create phantom ticket indices no
+        // participant holds, bricking the round.
+        uint256 totalTickets = round.ticketsSold;
+        require(totalTickets > 0, "No tickets sold");
         uint256 winningTicket = randomness % totalTickets;
         round.winningTicket = winningTicket;
         

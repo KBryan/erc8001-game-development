@@ -58,7 +58,9 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
      * @param target Roll under this number (1-99) to win
      */
     function placeBet(uint8 target) external payable returns (bytes32 commitHash) {
-        require(target > 1 && target < MAX_ROLL, "Target must be 2-99");
+        // Target 99 is excluded: at 2% house edge its payout would exactly
+        // equal the bet, leaving no winning outcome for the player.
+        require(target > 1 && target < MAX_ROLL - 1, "Target must be 2-98");
         require(msg.value >= minBet && msg.value <= maxBet, "Invalid bet size");
         
         // Calculate payout based on probability
@@ -66,8 +68,8 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
         // Fair payout: bet * 100 / (target - 1)
         // With house edge: fair payout * (1 - houseEdge)
         
-        uint256 fairPayout = (msg.value * MAX_ROLL * BPS_DENOMINATOR) / 
-                           ((target - 1) * (BPS_DENOMINATOR - houseEdgeBps));
+        uint256 fairPayout = (msg.value * MAX_ROLL * (BPS_DENOMINATOR - houseEdgeBps)) /
+                           ((target - 1) * BPS_DENOMINATOR);
         
         require(
             address(this).balance >= fairPayout - msg.value,
@@ -155,8 +157,8 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
         view 
         returns (uint256) 
     {
-        return (betAmount * MAX_ROLL * BPS_DENOMINATOR) / 
-               ((target - 1) * (BPS_DENOMINATOR - houseEdgeBps));
+        return (betAmount * MAX_ROLL * (BPS_DENOMINATOR - houseEdgeBps)) /
+               ((target - 1) * BPS_DENOMINATOR);
     }
     
     /**

@@ -124,24 +124,32 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
         
         require(req.user != address(0), "Request not found");
         require(!req.revealed, "Already revealed");
+        // Strictly after the target block: at block.number == commitBlock +
+        // REVEAL_DELAY, blockhash(commitBlock + REVEAL_DELAY) is the current
+        // block and returns 0, which would let a player who chose their
+        // entropy offline force a known outcome.
         require(
-            block.number >= req.commitBlock + REVEAL_DELAY,
+            block.number > req.commitBlock + REVEAL_DELAY,
             "Too early"
         );
+        // Expire the commit once the target blockhash leaves the 256-block
+        // window; a stale reveal must never fall through to a predictable 0.
         require(
             block.number < req.commitBlock + MAX_COMMIT_AGE,
-            "Too late - blockhash unavailable"
+            "Too late - commit expired"
         );
-        
+
         // Verify entropy matches commitment
         require(
             keccak256(abi.encodePacked(entropy)) == req.entropyHash,
             "Invalid entropy"
         );
-        
+
         // Generate randomness from future blockhash + user entropy
+        bytes32 targetHash = blockhash(req.commitBlock + REVEAL_DELAY);
+        require(targetHash != bytes32(0), "Blockhash unavailable");
         bytes32 randomness = keccak256(abi.encodePacked(
-            blockhash(req.commitBlock + REVEAL_DELAY),
+            targetHash,
             entropy,
             requestId
         ));

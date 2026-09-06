@@ -301,15 +301,7 @@ contract MultiplayerGameLobby {
 
         // Collect entry fee
         if (lobby.entryFee > 0) {
-            (bool xferSuccess, ) = gameToken.call(
-                abi.encodeWithSelector(
-                    bytes4(keccak256("transferFrom(address,address,uint256)")),
-                    msg.sender,
-                    address(this),
-                    lobby.entryFee
-                )
-            );
-            if (!xferSuccess) revert TransferFailed();
+            _safeTransferFrom(gameToken, msg.sender, address(this), lobby.entryFee);
         }
 
         // Accept coordination through ERC-8001
@@ -436,17 +428,11 @@ contract MultiplayerGameLobby {
         coordination.cancelCoordination(lobbyId, reason);
 
         // Refund entry fees to all who paid
+        // A failed refund is skipped rather than blocking cancellation
         for (uint256 i = 0; i < lobby.players.length; i++) {
             address player = lobby.players[i];
             if (coordination.hasAccepted(lobbyId, player) && lobby.entryFee > 0) {
-                (bool xferSuccess, ) = gameToken.call(
-                    abi.encodeWithSelector(
-                        bytes4(keccak256("transfer(address,uint256)")),
-                        player,
-                        lobby.entryFee
-                    )
-                );
-                if (xferSuccess) {
+                if (_tryTransfer(gameToken, player, lobby.entryFee)) {
                     emit EntryFeeRefunded(lobbyId, player, lobby.entryFee);
                 }
             }
@@ -455,6 +441,38 @@ contract MultiplayerGameLobby {
         lobby.status = LobbyStatus.Cancelled;
 
         emit LobbyCancelled(lobbyId, msg.sender, reason);
+    }
+
+    // ============ Token Transfer Helpers ============
+
+    /**
+     * @notice Transfer tokens from an approved account, reverting on failure
+     * @dev Checks return data because some ERC-20s return false instead of
+     *      reverting, and others (like USDT) return nothing at all
+     */
+    function _safeTransferFrom(address token, address from, address to, uint256 amount) private {
+        (bool success, bytes memory returndata) = token.call(
+            abi.encodeWithSelector(
+                bytes4(keccak256("transferFrom(address,address,uint256)")),
+                from,
+                to,
+                amount
+            )
+        );
+        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
+            revert TransferFailed();
+        }
+    }
+
+    /**
+     * @notice Attempt a token transfer, returning success instead of reverting
+     * @dev Used in refund loops where one failed transfer must not block the rest
+     */
+    function _tryTransfer(address token, address to, uint256 amount) private returns (bool ok) {
+        (bool success, bytes memory returndata) = token.call(
+            abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount)
+        );
+        return success && (returndata.length == 0 || abi.decode(returndata, (bool)));
     }
 
     // ============ View Functions ============

@@ -79,21 +79,41 @@ contract GameToken is ERC20, AccessControl, Pausable {
     }
     
     /**
-     * @notice Lock tokens for in-game activities
+     * @notice Lock a user's tokens for in-game activities
+     * @dev Only game contracts may lock; locks are enforced on every
+     *      transfer via _beforeTokenTransfer
      */
-    function lock(uint256 amount) external {
-        require(balanceOf(msg.sender) >= amount, "Insufficient balance");
-        lockedBalance[msg.sender] += amount;
-        emit BalanceLocked(msg.sender, amount);
+    function lock(address user, uint256 amount) external onlyRole(GAME_CONTRACT_ROLE) {
+        require(
+            balanceOf(user) - lockedBalance[user] >= amount,
+            "Insufficient unlocked balance"
+        );
+        lockedBalance[user] += amount;
+        emit BalanceLocked(user, amount);
     }
-    
+
     /**
-     * @notice Unlock tokens
+     * @notice Unlock a user's tokens
+     * @dev Only game contracts may release locks they placed
      */
-    function unlock(uint256 amount) external {
-        require(lockedBalance[msg.sender] >= amount, "Insufficient locked");
-        lockedBalance[msg.sender] -= amount;
-        emit BalanceUnlocked(msg.sender, amount);
+    function unlock(address user, uint256 amount) external onlyRole(GAME_CONTRACT_ROLE) {
+        require(lockedBalance[user] >= amount, "Insufficient locked");
+        lockedBalance[user] -= amount;
+        emit BalanceUnlocked(user, amount);
+    }
+
+    /**
+     * @notice Pause all token transfers
+     */
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @notice Resume token transfers
+     */
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
     }
     
     /**
@@ -116,5 +136,24 @@ contract GameToken is ERC20, AccessControl, Pausable {
             "Insufficient unlocked balance"
         );
         return transfer(to, amount);
+    }
+
+    /**
+     * @dev Enforces the pause state and locked balances on all transfers
+     *      and burns. Minting is unaffected by locks.
+     */
+    function _beforeTokenTransfer(address from, address to, uint256 amount)
+        internal
+        override
+        whenNotPaused
+    {
+        super._beforeTokenTransfer(from, to, amount);
+
+        if (from != address(0)) {
+            require(
+                balanceOf(from) - lockedBalance[from] >= amount,
+                "Insufficient unlocked balance"
+            );
+        }
     }
 }

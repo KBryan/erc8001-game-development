@@ -72,17 +72,17 @@ contract SimplePonzi {
         address newInvestor = msg.sender;
         uint256 amount = msg.value;
 
-        // If there's a previous investor, pay them
-        if (previousInvestor != address(0)) {
-            uint256 payout = previousInvestment * MULTIPLIER_BPS / BPS_DENOMINATOR;
+        // Pay the investor being replaced 110% of their investment,
+        // funded by the new deposit -- the Ponzi mechanism
+        if (currentWinner != address(0)) {
+            uint256 payout = highestBid * MULTIPLIER_BPS / BPS_DENOMINATOR;
 
-            // Send payout to previous investor
-            (bool success, ) = payable(previousInvestor).call{value: payout}("");
+            (bool success, ) = payable(currentWinner).call{value: payout}("");
             if (!success) {
-                revert PayoutFailed(previousInvestor, payout);
+                revert PayoutFailed(currentWinner, payout);
             }
 
-            emit PayoutSent(previousInvestor, payout);
+            emit PayoutSent(currentWinner, payout);
         }
 
         // Update state

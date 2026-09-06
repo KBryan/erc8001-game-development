@@ -128,6 +128,9 @@ contract TeamStaking {
     /// @notice Teams by member
     mapping(address => bytes32[]) public memberTeams;
 
+    /// @notice Whether the leader has declared an emergency for a team
+    mapping(bytes32 => bool) public emergencyDeclared;
+
     // ============ Events ============
 
     /// @notice Emitted when team stake is created
@@ -183,6 +186,9 @@ contract TeamStaking {
         bytes32 indexed stakeId,
         uint256 newExpiresAt
     );
+
+    /// @notice Emitted when leader declares an emergency
+    event EmergencyDeclared(bytes32 indexed stakeId, address indexed leader);
 
     // ============ Errors ============
 
@@ -331,15 +337,7 @@ contract TeamStaking {
         if (memberStakes[stakeId][msg.sender].amount > 0) revert AlreadyContributed();
 
         // Transfer stake tokens
-        (bool xferSuccess, ) = stakeToken.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transferFrom(address,address,uint256)")),
-                msg.sender,
-                address(this),
-                amount
-            )
-        );
-        if (!xferSuccess) revert TransferFailed();
+        _safeTransferFrom(stakeToken, msg.sender, address(this), amount);
 
         // Record member stake
         memberStakes[stakeId][msg.sender] = MemberStake({
@@ -421,15 +419,7 @@ contract TeamStaking {
         if (distributionType > 1) revert InvalidTeamSize(); // 0 or 1 only
 
         // Transfer rewards to contract
-        (bool xferSuccess, ) = stake.rewardToken.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transferFrom(address,address,uint256)")),
-                msg.sender,
-                address(this),
-                totalRewards
-            )
-        );
-        if (!xferSuccess) revert TransferFailed();
+        _safeTransferFrom(stake.rewardToken, msg.sender, address(this), totalRewards);
 
         // Calculate per-share reward
         uint256 perShare = distributionType == 0
@@ -461,6 +451,7 @@ contract TeamStaking {
 
         if (!stake.active) revert StakeNotActive();
         if (!member.isMember) revert NotTeamMember();
+        if (member.hasWithdrawn) revert AlreadyWithdrawn();
         if (member.amount == 0) revert NoRewardsToClaim();
 
         // Calculate claimable rewards
@@ -471,14 +462,7 @@ contract TeamStaking {
         member.claimedRewards += pendingRewards;
 
         // Transfer rewards
-        (bool xferSuccess, ) = stake.rewardToken.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transfer(address,uint256)")),
-                msg.sender,
-                pendingRewards
-            )
-        );
-        if (!xferSuccess) revert TransferFailed();
+        _safeTransfer(stake.rewardToken, msg.sender, pendingRewards);
 
         emit RewardsClaimed(stakeId, msg.sender, pendingRewards);
     }
@@ -500,31 +484,45 @@ contract TeamStaking {
 
         // Calculate final rewards
         uint256 pendingRewards = calculatePendingRewards(stakeId, msg.sender);
-        uint256 totalReturn = member.amount + pendingRewards;
+        uint256 stakedAmount = member.amount;
+        uint256 totalReturn = stakedAmount + pendingRewards;
 
-        // Mark as withdrawn
+        // Mark as withdrawn and zero the stake so no future rewards accrue
         member.hasWithdrawn = true;
+        member.amount = 0;
 
         // Transfer stake + rewards
-        (bool xferSuccess, ) = stakeToken.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transfer(address,uint256)")),
-                msg.sender,
-                totalReturn
-            )
-        );
-        if (!xferSuccess) revert TransferFailed();
+        _safeTransfer(stakeToken, msg.sender, totalReturn);
 
-        emit StakeWithdrawn(stakeId, msg.sender, member.amount, pendingRewards);
+        emit StakeWithdrawn(stakeId, msg.sender, stakedAmount, pendingRewards);
     }
 
     // ============ Emergency Withdraw ============
 
     /**
-     * @notice Emergency withdraw (may forfeit rewards)
-     * @dev Only allowed after stake expires or by leader decision
+     * @notice Leader declares an emergency, unlocking early withdrawal for all members
+     * @dev Irreversible. This is the only way to exit an active stake before
+     *      the lock period ends - see emergencyWithdraw()
      * @param stakeId Team stake ID
-     * @param forfeitRewards Whether to forfeit rewards for early exit
+     */
+    function declareEmergency(bytes32 stakeId) external {
+        TeamStake storage stake = teamStakes[stakeId];
+
+        if (stake.intentHash == bytes32(0)) revert StakeNotFound();
+        if (msg.sender != stake.leader) revert NotTeamLeader();
+
+        emergencyDeclared[stakeId] = true;
+
+        emit EmergencyDeclared(stakeId, msg.sender);
+    }
+
+    /**
+     * @notice Emergency withdraw before the lock period ends
+     * @dev Genuinely exceptional path: only available when the stake never
+     *      activated or the leader has declared an emergency. Expired stakes
+     *      use withdrawStake() instead - this cannot bypass an active lock
+     * @param stakeId Team stake ID
+     * @param forfeitRewards Whether to forfeit unclaimed rewards on exit
      */
     function emergencyWithdraw(
         bytes32 stakeId,
@@ -537,26 +535,19 @@ contract TeamStaking {
         if (!member.isMember) revert NotTeamMember();
         if (member.hasWithdrawn) revert AlreadyWithdrawn();
 
-        bool canWithdraw = block.number >= stake.expiresAt || 
-                          msg.sender == stake.leader ||
-                          !stake.active;
+        // Active, non-emergency stakes stay locked until expiry
+        if (stake.active && !emergencyDeclared[stakeId]) revert StakeStillLocked();
 
-        if (!canWithdraw && !forfeitRewards) revert StakeStillLocked();
+        uint256 pendingRewards = forfeitRewards ? 0 : calculatePendingRewards(stakeId, msg.sender);
+        uint256 stakedAmount = member.amount;
 
-        uint256 returnAmount = forfeitRewards ? member.amount : member.amount + calculatePendingRewards(stakeId, msg.sender);
-
+        // Mark as withdrawn and zero the stake so no future rewards accrue
         member.hasWithdrawn = true;
+        member.amount = 0;
 
-        (bool xferSuccess, ) = stakeToken.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transfer(address,uint256)")),
-                msg.sender,
-                returnAmount
-            )
-        );
-        if (!xferSuccess) revert TransferFailed();
+        _safeTransfer(stakeToken, msg.sender, stakedAmount + pendingRewards);
 
-        emit StakeWithdrawn(stakeId, msg.sender, member.amount, forfeitRewards ? 0 : calculatePendingRewards(stakeId, msg.sender));
+        emit StakeWithdrawn(stakeId, msg.sender, stakedAmount, pendingRewards);
     }
 
     // ============ View Functions ============
@@ -653,11 +644,45 @@ contract TeamStaking {
         if (!m.isMember) return (false, "Not a member");
         if (m.hasWithdrawn) return (false, "Already withdrawn");
         if (block.number >= stake.expiresAt) return (true, "");
-        if (member == stake.leader) return (true, "Leader override");
+        if (emergencyDeclared[stakeId]) return (true, "Emergency declared");
         if (!stake.active) return (true, "Stake inactive");
 
         uint256 blocksRemaining = stake.expiresAt - block.number;
         return (false, string(abi.encodePacked("Locked for ", uintToString(blocksRemaining), " blocks")));
+    }
+
+    // ============ Token Transfer Helpers ============
+
+    /**
+     * @notice Transfer tokens, reverting on failure
+     * @dev Checks return data because some ERC-20s return false instead of
+     *      reverting, and others (like USDT) return nothing at all
+     */
+    function _safeTransfer(address token, address to, uint256 amount) private {
+        (bool success, bytes memory returndata) = token.call(
+            abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount)
+        );
+        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
+            revert TransferFailed();
+        }
+    }
+
+    /**
+     * @notice Transfer tokens from an approved account, reverting on failure
+     * @dev Same return-data check as _safeTransfer
+     */
+    function _safeTransferFrom(address token, address from, address to, uint256 amount) private {
+        (bool success, bytes memory returndata) = token.call(
+            abi.encodeWithSelector(
+                bytes4(keccak256("transferFrom(address,address,uint256)")),
+                from,
+                to,
+                amount
+            )
+        );
+        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
+            revert TransferFailed();
+        }
     }
 
     // ============ Utility Functions ============

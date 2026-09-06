@@ -13,6 +13,10 @@ contract PonziPyramidTest is Test {
     address public bob = address(2);
     address public carol = address(3);
     
+    // The test contract deploys the pyramid, making it the creator that
+    // receives commissions -- it must be able to accept ETH
+    receive() external payable {}
+
     function setUp() public {
         ponzi = new SimplePonzi();
         pyramid = new SimplePyramid();

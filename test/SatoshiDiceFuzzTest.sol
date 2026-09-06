@@ -16,8 +16,9 @@ contract SatoshiDiceFuzzTest is Test {
      * @notice Fuzz test: Any valid target should calculate consistent payouts
      */
     function testFuzz_PayoutCalculation(uint8 target, uint256 amount) public {
-        // Bound inputs to valid ranges
-        target = uint8(bound(target, 2, 99));
+        // Bound inputs to valid ranges (99 is excluded: the house edge
+        // exactly cancels the fair profit there, so the game rejects it)
+        target = uint8(bound(target, 2, 98));
         amount = bound(amount, 0.001 ether, 1 ether);
         
         uint256 payout = dice.calculatePayout(amount, target);
@@ -37,7 +38,7 @@ contract SatoshiDiceFuzzTest is Test {
      * @notice Fuzz test: Expected value should always be negative (house edge)
      */
     function testFuzz_HouseEdge(uint8 target) public {
-        target = uint8(bound(target, 2, 99));
+        target = uint8(bound(target, 2, 98));
         
         int256 ev = dice.expectedValue(1 ether, target);
         

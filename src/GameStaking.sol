@@ -129,8 +129,10 @@ contract GameStaking is ReentrancyGuard, Ownable {
             "Lock period not ended"
         );
 
-        s.claimed = true;
+        // Compute the reward before marking the stake claimed --
+        // calculateReward returns 0 for claimed stakes
         uint256 reward = calculateReward(msg.sender, stakeId);
+        s.claimed = true;
 
         require(rewardPool >= reward, "Insufficient reward pool");
 

@@ -93,6 +93,9 @@ contract GameCoordination is AgentCoordination {
     /// @notice Individual contributions to team stakes
     mapping(bytes32 => mapping(address => uint256)) public teamContributions;
 
+    /// @notice Reward tokens deposited for each team, awaiting distribution
+    mapping(bytes32 => uint256) public teamRewardPools;
+
     // ============ Battle State ============
 
     /**
@@ -295,16 +298,7 @@ contract GameCoordination is AgentCoordination {
 
             // Transfer tokens from participant to this contract
             // Note: Participants must approve this contract beforehand
-            (bool xferSuccess, ) = gameToken.call(
-                abi.encodeWithSelector(
-                    bytes4(keccak256("transferFrom(address,address,uint256)")),
-                    participant,
-                    address(this),
-                    entryFee
-                )
-            );
-
-            if (!xferSuccess) revert TransferFailed();
+            _safeTransferFrom(gameToken, participant, address(this), entryFee);
 
             hasEnteredTournament[intentHash][participant] = true;
         }
@@ -331,18 +325,21 @@ contract GameCoordination is AgentCoordination {
 
     /**
      * @notice Complete tournament and distribute prize to winner
-     * @dev Only callable after tournament coordination is executed
+     * @dev Only the coordination proposer (tournament organizer) may complete
      * @param intentHash Tournament intent hash
      * @param winnerAddress Address of tournament winner
      */
     function completeTournament(
-        bytes32 intentHash, 
+        bytes32 intentHash,
         address winnerAddress
     ) external nonReentrant {
         Tournament storage tournament = tournaments[intentHash];
 
         if (tournament.intentHash == bytes32(0)) revert TournamentNotFound();
         if (tournament.completed) revert TournamentAlreadyExists();
+
+        // Only the organizer who proposed the coordination can name a winner
+        if (msg.sender != states[intentHash].proposer) revert NotAuthorized();
 
         // Verify winner is a participant
         (bool isParticipant, ) = _binarySearch(getParticipants(intentHash), winnerAddress);
@@ -353,15 +350,7 @@ contract GameCoordination is AgentCoordination {
         tournament.completed = true;
 
         // Transfer prize pool to winner
-        (bool xferSuccess, ) = gameToken.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transfer(address,uint256)")),
-                winnerAddress,
-                tournament.prizePool
-            )
-        );
-
-        if (!xferSuccess) revert TransferFailed();
+        _safeTransfer(gameToken, winnerAddress, tournament.prizePool);
 
         emit TournamentCompleted(intentHash, winnerAddress, tournament.prizePool);
     }
@@ -424,46 +413,51 @@ contract GameCoordination is AgentCoordination {
      */
     function contributeToTeamStake(bytes32 intentHash, uint256 amount) external nonReentrant {
         // Transfer tokens from contributor
-        (bool xferSuccess, ) = gameToken.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transferFrom(address,address,uint256)")),
-                msg.sender,
-                address(this),
-                amount
-            )
-        );
-
-        if (!xferSuccess) revert TransferFailed();
+        _safeTransferFrom(gameToken, msg.sender, address(this), amount);
 
         teamContributions[intentHash][msg.sender] += amount;
     }
 
     /**
-     * @notice Distribute rewards to all team members
+     * @notice Deposit reward tokens into a team's reward pool
+     * @dev Anyone may fund the pool; distribution draws only from deposits
      * @param intentHash Team stake intent hash
-     * @param totalRewards Total rewards to distribute
+     * @param amount Amount of reward tokens to deposit
      */
-    function distributeTeamRewards(
-        bytes32 intentHash, 
-        uint256 totalRewards
-    ) external nonReentrant {
+    function depositTeamRewards(bytes32 intentHash, uint256 amount) external nonReentrant {
         TeamStake storage stake = teamStakes[intentHash];
 
         if (!stake.active) revert TournamentNotFound(); // Reusing error
+        if (amount == 0) revert InvalidEntryFee(); // Reusing error
+
+        _safeTransferFrom(stake.rewardToken, msg.sender, address(this), amount);
+
+        teamRewardPools[intentHash] += amount;
+    }
+
+    /**
+     * @notice Distribute the deposited reward pool to all team members
+     * @dev Only the coordination proposer may distribute; amount comes from
+     *      tracked deposits, never from a caller-supplied number
+     * @param intentHash Team stake intent hash
+     */
+    function distributeTeamRewards(bytes32 intentHash) external nonReentrant {
+        TeamStake storage stake = teamStakes[intentHash];
+
+        if (!stake.active) revert TournamentNotFound(); // Reusing error
+        if (msg.sender != states[intentHash].proposer) revert NotAuthorized();
+
+        uint256 totalRewards = teamRewardPools[intentHash];
+        if (totalRewards == 0) revert InvalidEntryFee(); // Reusing error
+
+        // Zero the pool before transfers
+        teamRewardPools[intentHash] = 0;
 
         address[] memory participants = getParticipants(intentHash);
         uint256 perMemberShare = totalRewards / participants.length;
 
         for (uint256 i = 0; i < participants.length; i++) {
-            (bool xferSuccess, ) = stake.rewardToken.call(
-                abi.encodeWithSelector(
-                    bytes4(keccak256("transfer(address,uint256)")),
-                    participants[i],
-                    perMemberShare
-                )
-            );
-
-            if (!xferSuccess) revert TransferFailed();
+            _safeTransfer(stake.rewardToken, participants[i], perMemberShare);
         }
 
         emit TeamRewardsDistributed(intentHash, totalRewards, perMemberShare);
@@ -498,27 +492,8 @@ contract GameCoordination is AgentCoordination {
             : state.participants[0];
 
         // Collect wagers from both players
-        // From challenger
-        (bool xfer1, ) = gameToken.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transferFrom(address,address,uint256)")),
-                challenger,
-                address(this),
-                wager
-            )
-        );
-        if (!xfer1) revert TransferFailed();
-
-        // From defender
-        (bool xfer2, ) = gameToken.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transferFrom(address,address,uint256)")),
-                defender,
-                address(this),
-                wager
-            )
-        );
-        if (!xfer2) revert TransferFailed();
+        _safeTransferFrom(gameToken, challenger, address(this), wager);
+        _safeTransferFrom(gameToken, defender, address(this), wager);
 
         // Store battle data
         battles[intentHash] = Battle({
@@ -537,17 +512,28 @@ contract GameCoordination is AgentCoordination {
 
     /**
      * @notice Resolve battle with winner
+     * @dev Only the coordination proposer (battle arbiter) may resolve
      * @param intentHash Battle intent hash
      * @param winnerAddress Winner address (0x0 for draw - returns wagers)
      */
     function resolveBattle(
-        bytes32 intentHash, 
+        bytes32 intentHash,
         address winnerAddress
     ) external nonReentrant {
         Battle storage battle = battles[intentHash];
 
         if (battle.intentHash == bytes32(0)) revert BattleNotFound();
         if (battle.resolved) revert BattleAlreadyResolved();
+
+        // Only the proposer who arranged the battle can resolve it
+        if (msg.sender != states[intentHash].proposer) revert NotAuthorized();
+
+        // Winner must be one of the two combatants (or 0x0 for a draw)
+        if (
+            winnerAddress != address(0) &&
+            winnerAddress != battle.challenger &&
+            winnerAddress != battle.defender
+        ) revert NotAuthorized();
 
         battle.resolved = true;
         battle.winner = winnerAddress;
@@ -556,34 +542,14 @@ contract GameCoordination is AgentCoordination {
 
         if (winnerAddress == address(0)) {
             // Draw - return wagers to both players
-            (bool xfer1, ) = gameToken.call(
-                abi.encodeWithSelector(
-                    bytes4(keccak256("transfer(address,uint256)")),
-                    battle.challenger,
-                    battle.wager
-                )
-            );
-            (bool xfer2, ) = gameToken.call(
-                abi.encodeWithSelector(
-                    bytes4(keccak256("transfer(address,uint256)")),
-                    battle.defender,
-                    battle.wager
-                )
-            );
-            if (!xfer1 || !xfer2) revert TransferFailed();
+            _safeTransfer(gameToken, battle.challenger, battle.wager);
+            _safeTransfer(gameToken, battle.defender, battle.wager);
         } else {
             // Winner takes all
-            (bool xfer, ) = gameToken.call(
-                abi.encodeWithSelector(
-                    bytes4(keccak256("transfer(address,uint256)")),
-                    winnerAddress,
-                    totalPrize
-                )
-            );
-            if (!xfer) revert TransferFailed();
-
-            emit BattleResolved(intentHash, winnerAddress, totalPrize);
+            _safeTransfer(gameToken, winnerAddress, totalPrize);
         }
+
+        emit BattleResolved(intentHash, winnerAddress, totalPrize);
     }
 
     // ============ Loot Share Execution ============
@@ -694,6 +660,40 @@ contract GameCoordination is AgentCoordination {
         // Lobby is primarily an off-chain coordination signal
         // Return data for game servers to use
         return (true, abi.encode(gameMode, mapId, state.participants.length));
+    }
+
+    // ============ Token Transfer Helpers ============
+
+    /**
+     * @notice Transfer tokens, reverting on failure
+     * @dev Checks return data because some ERC-20s return false instead of
+     *      reverting, and others (like USDT) return nothing at all
+     */
+    function _safeTransfer(address token, address to, uint256 amount) private {
+        (bool success, bytes memory returndata) = token.call(
+            abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount)
+        );
+        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
+            revert TransferFailed();
+        }
+    }
+
+    /**
+     * @notice Transfer tokens from an approved account, reverting on failure
+     * @dev Same return-data check as _safeTransfer
+     */
+    function _safeTransferFrom(address token, address from, address to, uint256 amount) private {
+        (bool success, bytes memory returndata) = token.call(
+            abi.encodeWithSelector(
+                bytes4(keccak256("transferFrom(address,address,uint256)")),
+                from,
+                to,
+                amount
+            )
+        );
+        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
+            revert TransferFailed();
+        }
     }
 
     // ============ View Functions ============

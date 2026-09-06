@@ -16,17 +16,15 @@ contract PostDeployment is Script {
         // Transfer ownership
         Ownable(token).transferOwnership(newOwner);
         
-        // Grant admin role
-        AccessControl(token).grantRole(
-            keccak256("DEFAULT_ADMIN_ROLE"),
-            newOwner
-        );
-        
+        // Grant admin role.
+        // CAUTION: DEFAULT_ADMIN_ROLE is bytes32(0), NOT keccak256 of its
+        // name -- hashing the name grants a meaningless role while the
+        // deployer silently keeps real admin.
+        bytes32 adminRole = AccessControl(token).DEFAULT_ADMIN_ROLE();
+        AccessControl(token).grantRole(adminRole, newOwner);
+
         // Renounce deployer roles
-        AccessControl(token).renounceRole(
-            keccak256("DEFAULT_ADMIN_ROLE"),
-            vm.addr(deployerKey)
-        );
+        AccessControl(token).renounceRole(adminRole, vm.addr(deployerKey));
         
         vm.stopBroadcast();
     }

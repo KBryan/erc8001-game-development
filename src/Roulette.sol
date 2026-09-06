@@ -7,6 +7,13 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 /**
  * @title Roulette
  * @notice European roulette with 6 bet types
+ * @dev WARNING: INSECURE RANDOMNESS - educational only, do not deploy with
+ *      real funds. The spin result is derived from blockhash(block.number - 1),
+ *      msg.sender, and block.timestamp in the same transaction that places the
+ *      bet, so every input is known before the transaction executes. An
+ *      attacker contract can precompute the outcome and submit a straight-up
+ *      35:1 bet only when it is guaranteed to win. A production casino must
+ *      use a verifiable randomness source such as Chainlink VRF.
  */
 contract Roulette is ReentrancyGuard, Ownable {
     
@@ -151,6 +158,14 @@ contract Roulette is ReentrancyGuard, Ownable {
         return 270;
     }
     
+    /**
+     * @dev WARNING: INSECURE RANDOMNESS - educational only, do not deploy
+     *      with real funds. blockhash(block.number - 1), msg.sender, and
+     *      block.timestamp are all readable before this transaction runs, so
+     *      a contract can compute the result off-chain (or in the same
+     *      transaction) and bet only on guaranteed wins. Production must use
+     *      a VRF.
+     */
     function _generateResult() internal view returns (uint8) {
         return uint8(
             uint256(keccak256(abi.encodePacked(
