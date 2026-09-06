@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {AgentCoordination} from "./AgentCoordination.sol";
+import {AgentIntent, AcceptanceAttestation, CoordinationPayload, Status} from "./IAgentCoordination.sol";
 import {GameCoordination} from "./GameCoordination.sol";
 
 /**
@@ -199,9 +200,9 @@ contract MultiplayerGameLobby {
      * - Lobby is now waiting for player acceptances
      */
     function createLobby(
-        AgentCoordination.AgentIntent calldata intent,
+        AgentIntent calldata intent,
         bytes calldata signature,
-        AgentCoordination.CoordinationPayload calldata payload,
+        CoordinationPayload calldata payload,
         uint256 gameMode,
         bytes32 mapId
     ) external returns (bytes32 lobbyId) {
@@ -270,7 +271,7 @@ contract MultiplayerGameLobby {
      */
     function joinLobby(
         bytes32 lobbyId,
-        AgentCoordination.AcceptanceAttestation calldata attestation
+        AcceptanceAttestation calldata attestation
     ) external lobbyExists(lobbyId) {
         GameLobby storage lobby = lobbies[lobbyId];
 
@@ -348,7 +349,7 @@ contract MultiplayerGameLobby {
      */
     function startGame(
         bytes32 lobbyId,
-        AgentCoordination.CoordinationPayload calldata payload,
+        CoordinationPayload calldata payload,
         bytes calldata executionData
     ) external lobbyExists(lobbyId) {
         GameLobby storage lobby = lobbies[lobbyId];
@@ -476,14 +477,13 @@ contract MultiplayerGameLobby {
      * @return requiredCount Total participants required
      */
     function getCoordinationStatus(bytes32 lobbyId) external view returns (
-        AgentCoordination.Status status,
+        Status status,
         address proposer,
         uint256 acceptedCount,
         uint256 requiredCount
     ) {
-        (status, proposer,,, uint256 expiry) = coordination.getCoordinationStatus(lobbyId);
-        (,,,, acceptedCount, requiredCount,) = coordination.getCoordinationDetails(lobbyId);
-        (expiry); // Silence warning
+        (status, proposer,,,) = coordination.getCoordinationStatus(lobbyId);
+        (,,,,, acceptedCount, requiredCount,) = coordination.getCoordinationDetails(lobbyId);
     }
 
     /**

@@ -89,19 +89,9 @@ library ECDSA {
             return (address(0), RecoverError.InvalidSignature);
         }
 
-        // Recover address using ecrecover
-        assembly ("memory-safe") {
-            // Allocate scratch space for ecrecover output
-            let ptr := mload(0x40)
-            mstore(ptr, hash)
-            mstore(add(ptr, 0x20), v)
-            mstore(add(ptr, 0x40), r)
-            mstore(add(ptr, 0x60), s)
-            
-            // Call ecrecover precompile (address 0x01)
-            recovered := staticcall(gas(), 0x01, ptr, 0x80, ptr, 0x20)
-            recovered := mload(ptr)
-        }
+        // Recover address using the ecrecover builtin; it returns address(0)
+        // on failure, which the check below converts into an explicit error.
+        recovered = ecrecover(hash, v, r, s);
 
         if (recovered == address(0)) {
             return (address(0), RecoverError.InvalidSignature);

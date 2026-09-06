@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {IAgentCoordination, Status} from "./IAgentCoordination.sol";
+import {IAgentCoordination, Status, AgentIntent, AcceptanceAttestation, CoordinationPayload} from "./IAgentCoordination.sol";
 import {IERC1271} from "./interfaces/IERC1271.sol";
 import {ECDSA} from "./utils/ECDSA.sol";
 
@@ -59,7 +59,7 @@ contract AgentCoordination is IAgentCoordination {
     mapping(address => uint64) public agentNonces;
 
     /// @notice Intent hash to coordination state
-    mapping(bytes32 => CoordinationState) private states;
+    mapping(bytes32 => CoordinationState) internal states;
 
     /// @notice Reentrancy lock
     bool private _locked;

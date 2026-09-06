@@ -2,8 +2,8 @@
 pragma solidity 0.8.19;
 
 import "forge-std/Script.sol";
-import "../src/GameFi/GameToken.sol";
-import "../src/GameFi/GameStaking.sol";
+import "../src/GameToken.sol";
+import "../src/GameStaking.sol";
 
 contract DeployGameFi is Script {
     struct NetworkConfig {
@@ -15,16 +15,19 @@ contract DeployGameFi is Script {
     mapping(uint256 => NetworkConfig) public configs;
     
     constructor() {
+        // Admin address comes from the environment so no key is hardcoded
+        address admin = vm.envOr("GAMEFI_ADMIN", address(0));
+
         // Base Mainnet
         configs[8453] = NetworkConfig({
-            admin: 0x..., // Your address
+            admin: admin,
             maxSupply: 1_000_000_000 ether,
             dailyMintLimit: 100_000 ether
         });
-        
+
         // Arbitrum One
         configs[42161] = NetworkConfig({
-            admin: 0x...,
+            admin: admin,
             maxSupply: 1_000_000_000 ether,
             dailyMintLimit: 100_000 ether
         });

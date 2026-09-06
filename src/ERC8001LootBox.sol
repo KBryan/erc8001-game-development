@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {AgentCoordination} from "./AgentCoordination.sol";
+import {AgentIntent, AcceptanceAttestation, CoordinationPayload, Status} from "./IAgentCoordination.sol";
 import {GameCoordination} from "./GameCoordination.sol";
 
 /**
@@ -309,9 +310,9 @@ contract ERC8001LootBox {
      * - Participants must accept before opening
      */
     function createLootBox(
-        AgentCoordination.AgentIntent calldata intent,
+        AgentIntent calldata intent,
         bytes calldata signature,
-        AgentCoordination.CoordinationPayload calldata payload,
+        CoordinationPayload calldata payload,
         bytes32[] calldata itemHashes,
         uint256 openFee
     ) external returns (bytes32 boxId) {
@@ -377,7 +378,7 @@ contract ERC8001LootBox {
      */
     function agreeToOpen(
         bytes32 boxId,
-        AgentCoordination.AcceptanceAttestation calldata attestation
+        AcceptanceAttestation calldata attestation
     ) external onlyParticipant(boxId) {
         LootBox storage box = lootBoxes[boxId];
 
@@ -402,7 +403,7 @@ contract ERC8001LootBox {
         coordination.acceptCoordination(boxId, attestation);
 
         // Get updated status
-        (,, uint256 acceptedCount, uint256 requiredCount) = coordination.getCoordinationStatus(boxId);
+        (,,,,, uint256 acceptedCount, uint256 requiredCount,) = coordination.getCoordinationDetails(boxId);
 
         emit ParticipantAgreed(boxId, msg.sender, acceptedCount, requiredCount);
     }
@@ -428,7 +429,7 @@ contract ERC8001LootBox {
      */
     function openLootBox(
         bytes32 boxId,
-        AgentCoordination.CoordinationPayload calldata payload,
+        CoordinationPayload calldata payload,
         bytes32 userRandomness
     ) external payable onlyParticipant(boxId) returns (uint64 sequenceNumber) {
         LootBox storage box = lootBoxes[boxId];
@@ -437,7 +438,7 @@ contract ERC8001LootBox {
         if (box.cancelled) revert LootBoxAlreadyCancelled();
 
         // Check all participants agreed
-        (,, uint256 acceptedCount, uint256 requiredCount) = coordination.getCoordinationStatus(boxId);
+        (,,,,, uint256 acceptedCount, uint256 requiredCount,) = coordination.getCoordinationDetails(boxId);
         if (acceptedCount < requiredCount) revert NotAllAgreed();
 
         // Get Pyth entropy fee
@@ -484,12 +485,13 @@ contract ERC8001LootBox {
         // Distribute loot based on randomness
         ItemResult[] memory items = _distributeLoot(boxId, randomness);
 
-        // Store outcome
-        outcomes[boxId] = LootOutcome({
-            boxId: boxId,
-            items: items,
-            distributedAt: block.timestamp
-        });
+        // Store outcome (structs with dynamic arrays must be copied field by field)
+        LootOutcome storage outcome = outcomes[boxId];
+        outcome.boxId = boxId;
+        outcome.distributedAt = block.timestamp;
+        for (uint256 i = 0; i < items.length; i++) {
+            outcome.items.push(items[i]);
+        }
 
         // Clear pending request
         delete pendingRequests[sequenceNumber];
@@ -664,7 +666,7 @@ contract ERC8001LootBox {
     /**
      * @notice Check if loot box can be opened
      * @param boxId Loot box ID
-     * @return canOpen True if can open
+     * @return canOpen_ True if can open
      * @return reason Reason if cannot open
      */
     function canOpen(bytes32 boxId) external view returns (bool canOpen_, string memory reason) {
@@ -674,7 +676,7 @@ contract ERC8001LootBox {
         if (box.opened) return (false, "Already opened");
         if (box.cancelled) return (false, "Cancelled");
 
-        (,, uint256 acceptedCount, uint256 requiredCount) = coordination.getCoordinationStatus(boxId);
+        (,,,,, uint256 acceptedCount, uint256 requiredCount,) = coordination.getCoordinationDetails(boxId);
         if (acceptedCount < requiredCount) {
             return (false, string(abi.encodePacked(
                 "Waiting for ", 

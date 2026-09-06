@@ -59,7 +59,7 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
     
     uint256 public phaseStartTime;
     
-    // House fee (2.5
+    // House fee (2.5%)
     uint256 public constant HOUSE_FEE_BPS = 250;
     uint256 public constant BPS_DENOMINATOR = 10000;
     
@@ -162,7 +162,7 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         
         // Select winner based on ticket distribution
         uint256 totalTickets = pot / ticketPrice;
-        uint256 winningTicket = seed 
+        uint256 winningTicket = seed % totalTickets;
         
         uint256 currentTicket = 0;
         for (uint256 i = 0; i < entries.length; i++) {
@@ -285,7 +285,7 @@ contract RecurringLottery is
         uint256 ticketPrice;
         uint256 roundDuration;
         uint256 minPot; // Minimum pot to draw
-        uint256 rolloverPercent; // 
+        uint256 rolloverPercent; // % of pot to next round
         uint256 houseFeePercent;
     }
     
@@ -390,7 +390,7 @@ contract RecurringLottery is
         )));
         
         uint256 totalTickets = round.pot / config.ticketPrice;
-        uint256 winningTicket = randomness 
+        uint256 winningTicket = randomness % totalTickets;
         round.winningTicket = winningTicket;
         
         // Find winner
@@ -653,18 +653,18 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         
         // Generate unique numbers 1-69
         for (uint256 i = 0; i < 5; i++) {
-            numbers[i] = uint8((seed 
+            numbers[i] = uint8((seed % 69) + 1);
             seed >>= 8;
             
             // Ensure uniqueness (simple approach)
             for (uint256 j = 0; j < i; j++) {
                 if (numbers[i] == numbers[j]) {
-                    numbers[i] = uint8(((numbers[i] + seed) 
+                    numbers[i] = uint8(((numbers[i] + seed) % 69) + 1);
                 }
             }
         }
         
-        powerball = uint8((seed 
+        powerball = uint8((seed % 26) + 1);
     }
     
     function _checkWinningTier(Ticket memory ticket, Draw storage draw) 

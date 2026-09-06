@@ -49,7 +49,7 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
     
     uint256 public minBet = 0.001 ether;
     uint256 public maxBet = 1 ether;
-    uint256 public houseEdgeBps = 200; // 2
+    uint256 public houseEdgeBps = 200; // 2%
     uint256 public constant BPS_DENOMINATOR = 10000;
     uint256 public constant MAX_ROLL = 100;
     
@@ -150,7 +150,7 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
             commitHash
         )));
         
-        uint8 result = uint8(randomness 
+        uint8 result = uint8(randomness % MAX_ROLL) + 1; // 1-100
         bet.result = result;
         bet.revealed = true;
         
@@ -315,7 +315,7 @@ contract Roulette is ReentrancyGuard, Ownable {
     
     uint256 public minBet = 0.001 ether;
     uint256 public maxTotalBet = 10 ether;
-    uint256 public houseEdgeBps = 270; // 2.7
+    uint256 public houseEdgeBps = 270; // 2.7% (single zero advantage)
     
     uint256 public totalWagered;
     uint256 public totalPaid;
@@ -412,7 +412,7 @@ contract Roulette is ReentrancyGuard, Ownable {
      * @notice Get house edge for bet type
      */
     function getHouseEdge(BetType betType) external pure returns (uint256 bps) {
-        // European roulette: 2.7
+        // European roulette: 2.7% house edge on all bets
         // (1/37 = 0.027)
         return 270;
     }
@@ -423,7 +423,7 @@ contract Roulette is ReentrancyGuard, Ownable {
                 blockhash(block.number - 1),
                 msg.sender,
                 block.timestamp
-            ))) 
+            ))) % 37
         ); // 0-36
     }
     
@@ -482,7 +482,7 @@ contract Roulette is ReentrancyGuard, Ownable {
             if (result == 0) return false;
             // numbers[0]: 0 = even, 1 = odd
             bool betEven = bet.numbers[0] == 0;
-            bool resultEven = result 
+            bool resultEven = result % 2 == 0;
             return betEven == resultEven;
         }
         
@@ -507,7 +507,7 @@ contract Roulette is ReentrancyGuard, Ownable {
         
         if (bet.betType == BetType.Column) {
             uint8 col = bet.numbers[0]; // 0, 1, 2
-            return result > 0 && (result - 1) 
+            return result > 0 && (result - 1) % 3 == col;
         }
         
         return false;

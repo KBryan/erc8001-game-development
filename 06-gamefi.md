@@ -180,7 +180,7 @@ contract GameStaking is ReentrancyGuard, Ownable {
     struct Tier {
         uint256 minDuration;
         uint256 maxDuration;
-        uint256 baseAPY; // Basis points (10000 = 100
+        uint256 baseAPY; // Basis points (10000 = 100%)
         uint256 multiplier; // Tier bonus in bps
     }
     
@@ -211,9 +211,9 @@ contract GameStaking is ReentrancyGuard, Ownable {
         rewardToken = IERC20(_rewardToken);
         
         // Initialize tiers
-        tiers[0] = Tier(7 days, 30 days, 500, 1000);   // 5
-        tiers[1] = Tier(30 days, 90 days, 1000, 1500); // 10
-        tiers[2] = Tier(90 days, 365 days, 1500, 2500); // 15
+        tiers[0] = Tier(7 days, 30 days, 500, 1000);   // 5% APY
+        tiers[1] = Tier(30 days, 90 days, 1000, 1500); // 10% APY
+        tiers[2] = Tier(90 days, 365 days, 1500, 2500); // 15% APY
         tierCount = 3;
     }
     
@@ -589,7 +589,7 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
     struct LootBox {
         string name;
         uint256 price;
-        uint256[] probabilities; // Basis points (10000 = 100
+        uint256[] probabilities; // Basis points (10000 = 100%)
         uint256[] rewards;
         bool active;
     }
@@ -643,7 +643,7 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
         for (uint256 i = 0; i < probabilities.length; i++) {
             total += probabilities[i];
         }
-        require(total == 10000, "Probabilities must sum to 100
+        require(total == 10000, "Probabilities must sum to 100%");
         
         boxId = boxCount++;
         lootBoxes[boxId] = LootBox({
@@ -722,7 +722,7 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
         req.revealed = true;
         
         // Determine rarity
-        uint256 roll = uint256(randomness) 
+        uint256 roll = uint256(randomness) % 10000;
         LootBox memory box = lootBoxes[req.boxId];
         
         Rarity rarity;

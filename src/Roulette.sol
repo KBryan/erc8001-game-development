@@ -188,10 +188,10 @@ contract Roulette is ReentrancyGuard, Ownable {
         return true;
     }
     
-    function _calculatePayout(Bet[] calldata bets, uint8 result) 
-        internal 
-        pure 
-        returns (uint256 totalPayout) 
+    function _calculatePayout(Bet[] calldata bets, uint8 result)
+        internal
+        view
+        returns (uint256 totalPayout)
     {
         for (uint256 i = 0; i < bets.length; i++) {
             if (_isWinningBet(bets[i], result)) {

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {AgentCoordination} from "./AgentCoordination.sol";
+import {AgentIntent, AcceptanceAttestation, CoordinationPayload, Status} from "./IAgentCoordination.sol";
 import {GameCoordination} from "./GameCoordination.sol";
 
 /**
@@ -237,9 +238,9 @@ contract TeamStaking {
      * - Members must accept before stake activates
      */
     function createTeamStake(
-        AgentCoordination.AgentIntent calldata intent,
+        AgentIntent calldata intent,
         bytes calldata signature,
-        AgentCoordination.CoordinationPayload calldata payload,
+        CoordinationPayload calldata payload,
         uint256 minStake,
         uint256 maxStake,
         uint256 lockPeriod,
@@ -311,7 +312,7 @@ contract TeamStaking {
      */
     function contributeStake(
         bytes32 stakeId,
-        AgentCoordination.AcceptanceAttestation calldata attestation,
+        AcceptanceAttestation calldata attestation,
         uint256 amount
     ) external {
         TeamStake storage stake = teamStakes[stakeId];
@@ -373,7 +374,7 @@ contract TeamStaking {
      */
     function activateTeamStake(
         bytes32 stakeId,
-        AgentCoordination.CoordinationPayload calldata payload,
+        CoordinationPayload calldata payload,
         bytes calldata executionData
     ) external {
         TeamStake storage stake = teamStakes[stakeId];
@@ -382,7 +383,7 @@ contract TeamStaking {
         if (stake.active) revert StakeAlreadyExists();
 
         // Check all members have accepted
-        (,, uint256 acceptedCount, uint256 requiredCount) = coordination.getCoordinationStatus(stakeId);
+        (,,,,, uint256 acceptedCount, uint256 requiredCount,) = coordination.getCoordinationDetails(stakeId);
         if (acceptedCount < requiredCount) revert CoordinationNotReady();
 
         // Execute coordination
@@ -641,7 +642,7 @@ contract TeamStaking {
      * @notice Check if member can withdraw
      * @param stakeId Team stake ID
      * @param member Member address
-     * @return canWithdraw True if withdrawal is allowed
+     * @return canWithdraw_ True if withdrawal is allowed
      * @return reason Reason if not allowed
      */
     function canWithdraw(bytes32 stakeId, address member) external view returns (bool canWithdraw_, string memory reason) {

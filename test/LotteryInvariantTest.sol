@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.19;
 
-import "forge-std/InvariantTest.sol";
 import "forge-std/Test.sol";
 import "../src/SimpleLottery.sol";
 
-contract LotteryInvariantTest is InvariantTest, Test {
+contract LotteryInvariantTest is Test {
     SimpleLottery public lottery;
     Handler public handler;
     
@@ -25,7 +24,7 @@ contract LotteryInvariantTest is InvariantTest, Test {
      * @notice Invariant: Total invested should equal pot when no payouts
      */
     function invariant_PotAccounting() public {
-        assertEq(lottery.totalInvested(), lottery.pot());
+        assertEq(address(lottery).balance, lottery.pot());
     }
     
     /**
@@ -45,7 +44,7 @@ contract LotteryInvariantTest is InvariantTest, Test {
     }
 }
 
-contract Handler {
+contract Handler is Test {
     SimpleLottery public lottery;
     
     constructor(SimpleLottery _lottery) {

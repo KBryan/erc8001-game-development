@@ -58,7 +58,7 @@ contract SimplePonziTest is Test {
         vm.prank(bob);
         ponzi.invest{value: 0.011 ether}();
         
-        // Alice should receive 110
+        // Alice should receive 110% of her investment
         uint256 expectedPayout = 0.01 ether * 11000 / 10000;
         assertEq(alice.balance - aliceBalanceBefore, expectedPayout);
         

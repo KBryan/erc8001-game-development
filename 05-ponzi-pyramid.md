@@ -73,8 +73,8 @@ contract SimplePonzi {
     /// @notice Minimum initial investment
     uint256 public constant MIN_INITIAL_INVESTMENT = 0.01 ether;
     
-    /// @notice Multiplier for next required investment (110
-    uint256 public constant MULTIPLIER_BPS = 11000; // 10000 = 100
+    /// @notice Multiplier for next required investment (110% of previous)
+    uint256 public constant MULTIPLIER_BPS = 11000; // 10000 = 100%
     uint256 public constant BPS_DENOMINATOR = 10000;
     
     // ============ Modifiers ============
@@ -89,7 +89,7 @@ contract SimplePonzi {
     
     /**
      * @notice Invest ETH to become the current winner
-     * @dev The previous investor receives 110
+     * @dev The previous investor receives 110% of their investment
      */
     function invest() external payable validInvestment {
         address newInvestor = msg.sender;
@@ -264,7 +264,7 @@ contract SimplePyramid {
     
     /// @notice Commission percentages for each level (in basis points)
     uint16[MAX_DEPTH] public commissionRates = [2000, 1500, 1000, 500, 200];
-    // 20
+    // 20%, 15%, 10%, 5%, 2%
     
     /// @notice Participant data
     mapping(address => Participant) public participants;
@@ -508,7 +508,7 @@ contract PonziPyramidTest is Test {
         vm.prank(bob);
         ponzi.invest{value: 0.011 ether}();
         
-        // Alice should receive 110
+        // Alice should receive 110% of her investment
         assertEq(alice.balance - aliceBalanceBefore, 0.011 ether);
     }
     

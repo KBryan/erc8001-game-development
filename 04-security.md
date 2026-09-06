@@ -219,7 +219,7 @@ contract SecurePriceGame {
     uint256 public lastPrice;
     uint256 public lastUpdateTime;
     uint256 public constant MAX_PRICE_AGE = 1 hours;
-    uint256 public constant MAX_PRICE_DEVIATION = 10; // 10
+    uint256 public constant MAX_PRICE_DEVIATION = 10; // 10%
 
     function getValidatedPrice() public view returns (uint256) {
         (

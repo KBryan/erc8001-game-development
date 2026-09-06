@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {AgentCoordination, Status} from "./AgentCoordination.sol";
+import {AgentCoordination} from "./AgentCoordination.sol";
+import {Status, AgentIntent, AcceptanceAttestation, CoordinationPayload} from "./IAgentCoordination.sol";
 
 /**
  * @title GameCoordination
@@ -685,7 +686,7 @@ contract GameCoordination is AgentCoordination {
         CoordinationPayload calldata payload,
         bytes calldata executionData,
         CoordinationState storage state
-    ) internal pure returns (bool, bytes memory) {
+    ) internal view returns (bool, bytes memory) {
 
         // Decode lobby parameters (used off-chain)
         (uint256 gameMode, bytes32 mapId) = abi.decode(executionData, (uint256, bytes32));

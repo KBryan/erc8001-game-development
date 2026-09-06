@@ -144,7 +144,7 @@ Proper use of immutability declarations optimizes both gas and security.
 contract GameConfiguration {
     // Constant - inlined at compile time, no storage
     uint256 public constant MAX_BET = 100 ether;
-    uint256 public constant HOUSE_EDGE_BPS = 250; // 2.5
+    uint256 public constant HOUSE_EDGE_BPS = 250; // 2.5%
     uint8 public constant DECIMALS = 18;
 
     // Immutable - set in constructor, stored in code

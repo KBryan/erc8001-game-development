@@ -2,8 +2,8 @@
 pragma solidity 0.8.19;
 
 import "forge-std/Test.sol";
-import "../src/GameFi/GameToken.sol";
-import "../src/GameFi/GameStaking.sol";
+import "../src/GameToken.sol";
+import "../src/GameStaking.sol";
 
 contract GameFiIntegrationTest is Test {
     GameToken public token;
