@@ -95,8 +95,8 @@ Integration tests verify multiple contracts working together:
 pragma solidity 0.8.19;
 
 import "forge-std/Test.sol";
-import "../src/GameFi/GameToken.sol";
-import "../src/GameFi/GameStaking.sol";
+import "../src/GameToken.sol";
+import "../src/GameStaking.sol";
 
 contract GameFiIntegrationTest is Test {
     GameToken public token;
@@ -188,8 +188,9 @@ contract SatoshiDiceFuzzTest is Test {
      * @notice Fuzz test: Any valid target should calculate consistent payouts
      */
     function testFuzz_PayoutCalculation(uint8 target, uint256 amount) public {
-        // Bound inputs to valid ranges
-        target = uint8(bound(target, 2, 99));
+        // Bound inputs to valid ranges (99 is excluded: the house edge
+        // exactly cancels the fair profit there, so the game rejects it)
+        target = uint8(bound(target, 2, 98));
         amount = bound(amount, 0.001 ether, 1 ether);
         
         uint256 payout = dice.calculatePayout(amount, target);
@@ -209,7 +210,7 @@ contract SatoshiDiceFuzzTest is Test {
      * @notice Fuzz test: Expected value should always be negative (house edge)
      */
     function testFuzz_HouseEdge(uint8 target) public {
-        target = uint8(bound(target, 2, 99));
+        target = uint8(bound(target, 2, 98));
         
         int256 ev = dice.expectedValue(1 ether, target);
         
@@ -262,11 +263,10 @@ Invariants specify properties that must always hold:
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.19;
 
-import "forge-std/InvariantTest.sol";
 import "forge-std/Test.sol";
 import "../src/SimpleLottery.sol";
 
-contract LotteryInvariantTest is InvariantTest, Test {
+contract LotteryInvariantTest is Test {
     SimpleLottery public lottery;
     Handler public handler;
     
@@ -286,7 +286,7 @@ contract LotteryInvariantTest is InvariantTest, Test {
      * @notice Invariant: Total invested should equal pot when no payouts
      */
     function invariant_PotAccounting() public {
-        assertEq(lottery.totalInvested(), lottery.pot());
+        assertEq(address(lottery).balance, lottery.pot());
     }
     
     /**
@@ -306,7 +306,7 @@ contract LotteryInvariantTest is InvariantTest, Test {
     }
 }
 
-contract Handler {
+contract Handler is Test {
     SimpleLottery public lottery;
     
     constructor(SimpleLottery _lottery) {
@@ -328,6 +328,8 @@ contract Handler {
 ```
 
 *Invariant testing*
+
+The fuzzer calls the Handler's functions in random sequences, so the Handler shapes the inputs; it inherits `Test` so that cheatcodes like `bound` and `vm.deal` are available inside it.
 
 <a id="lst:invariant-testing"></a>
 

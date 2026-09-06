@@ -2,17 +2,17 @@
 
 ## Introduction
 
-Blockchain gambling games offer provably fair mechanics, transparent odds, and instant global accessibility. This chapter implements classic games with mathematical precision and proper house edge management.
+Blockchain gambling games can offer provably fair mechanics, transparent odds, and instant global accessibility---when built on a secure randomness source. This chapter implements classic games with mathematical precision and proper house edge management; note that the Roulette example deliberately uses insecure randomness as a teaching exercise.
 
 ### House Edge Fundamentals
 
 The house edge ensures long-term sustainability while providing entertainment value:
 
 \begin{equation}
-\text{House Edge} = \frac{\text{Expected Value}}{\text{Wager Amount}} \times 100\%
+\text{House Edge} = -\frac{\text{Expected Value}}{\text{Wager Amount}} \times 100\%
 \end{equation}
 
-A 2\% house edge means players lose an average of 2\% per bet over the long run---comparable to or better than traditional casinos.
+Because the player's expected value is negative, the house edge comes out as a positive percentage---the share of each wager the house keeps on average. A 2\% house edge means players lose an average of 2\% per bet over the long run---comparable to or better than traditional casinos.
 
 ## SatoshiDice: Modernized
 
@@ -77,10 +77,12 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
     
     /**
      * @notice Place a bet by committing a hash
-     * @param target Roll under this number (1-99) to win
+     * @param target Roll under this number (2-98) to win
      */
     function placeBet(uint8 target) external payable returns (bytes32 commitHash) {
-        require(target > 1 && target < MAX_ROLL, "Target must be 2-99");
+        // Target 99 is excluded: at 2% house edge its payout would exactly
+        // equal the bet, leaving no winning outcome for the player.
+        require(target > 1 && target < MAX_ROLL - 1, "Target must be 2-98");
         require(msg.value >= minBet && msg.value <= maxBet, "Invalid bet size");
         
         // Calculate payout based on probability
@@ -88,8 +90,8 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
         // Fair payout: bet * 100 / (target - 1)
         // With house edge: fair payout * (1 - houseEdge)
         
-        uint256 fairPayout = (msg.value * MAX_ROLL * BPS_DENOMINATOR) / 
-                           ((target - 1) * (BPS_DENOMINATOR - houseEdgeBps));
+        uint256 fairPayout = (msg.value * MAX_ROLL * (BPS_DENOMINATOR - houseEdgeBps)) /
+                           ((target - 1) * BPS_DENOMINATOR);
         
         require(
             address(this).balance >= fairPayout - msg.value,
@@ -177,8 +179,8 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
         view 
         returns (uint256) 
     {
-        return (betAmount * MAX_ROLL * BPS_DENOMINATOR) / 
-               ((target - 1) * (BPS_DENOMINATOR - houseEdgeBps));
+        return (betAmount * MAX_ROLL * (BPS_DENOMINATOR - houseEdgeBps)) /
+               ((target - 1) * BPS_DENOMINATOR);
     }
     
     /**
@@ -254,13 +256,13 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
 |---|---|---|---|---|
 | 10 | 9\% | 10.89x | 2.0\% | 98.0\% |
 | 25 | 24\% | 4.08x | 2.0\% | 98.0\% |
-| 50 | 49\% | 2.04x | 2.0\% | 98.0\% |
-| 75 | 74\% | 1.35x | 2.0\% | 98.0\% |
-| 90 | 89\% | 1.12x | 2.0\% | 98.0\% |
+| 50 | 49\% | 2.00x | 2.0\% | 98.0\% |
+| 75 | 74\% | 1.32x | 2.0\% | 98.0\% |
+| 90 | 89\% | 1.10x | 2.0\% | 98.0\% |
 
 ## Roulette: Multi-Bet Type
 
-European roulette with single zero, supporting multiple bet types.
+European roulette with single zero, supporting multiple bet types. This contract is an insecure teaching example: its spin result is precomputable in the same transaction (see the warning blocks below), so it must never be deployed with real funds.
 
 ```solidity
 
@@ -273,6 +275,13 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 /**
  * @title Roulette
  * @notice European roulette with 6 bet types
+ * @dev WARNING: INSECURE RANDOMNESS - educational only, do not deploy with
+ *      real funds. The spin result is derived from blockhash(block.number - 1),
+ *      msg.sender, and block.timestamp in the same transaction that places the
+ *      bet, so every input is known before the transaction executes. An
+ *      attacker contract can precompute the outcome and submit a straight-up
+ *      35:1 bet only when it is guaranteed to win. A production casino must
+ *      use a verifiable randomness source such as Chainlink VRF.
  */
 contract Roulette is ReentrancyGuard, Ownable {
     
@@ -417,6 +426,14 @@ contract Roulette is ReentrancyGuard, Ownable {
         return 270;
     }
     
+    /**
+     * @dev WARNING: INSECURE RANDOMNESS - educational only, do not deploy
+     *      with real funds. blockhash(block.number - 1), msg.sender, and
+     *      block.timestamp are all readable before this transaction runs, so
+     *      a contract can compute the result off-chain (or in the same
+     *      transaction) and bet only on guaranteed wins. Production must use
+     *      a VRF.
+     */
     function _generateResult() internal view returns (uint8) {
         return uint8(
             uint256(keccak256(abi.encodePacked(
@@ -454,10 +471,10 @@ contract Roulette is ReentrancyGuard, Ownable {
         return true;
     }
     
-    function _calculatePayout(Bet[] calldata bets, uint8 result) 
-        internal 
-        pure 
-        returns (uint256 totalPayout) 
+    function _calculatePayout(Bet[] calldata bets, uint8 result)
+        internal
+        view
+        returns (uint256 totalPayout)
     {
         for (uint256 i = 0; i < bets.length; i++) {
             if (_isWinningBet(bets[i], result)) {

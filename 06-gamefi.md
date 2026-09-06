@@ -15,7 +15,7 @@ A modern GameFi ecosystem consists of:
 
 ## GameToken Contract
 
-The foundation of any GameFi ecosystem is a well-designed token with gaming-specific features.
+The foundation of any GameFi ecosystem is a well-designed token with gaming-specific features. Balance locks are managed by authorized game contracts (holders do not lock or unlock their own tokens), and both locks and the admin's pause are enforced on every transfer through the `_beforeTokenTransfer` hook.
 
 ```solidity
 
@@ -100,21 +100,41 @@ contract GameToken is ERC20, AccessControl, Pausable {
     }
     
     /**
-     * @notice Lock tokens for in-game activities
+     * @notice Lock a user's tokens for in-game activities
+     * @dev Only game contracts may lock; locks are enforced on every
+     *      transfer via _beforeTokenTransfer
      */
-    function lock(uint256 amount) external {
-        require(balanceOf(msg.sender) >= amount, "Insufficient balance");
-        lockedBalance[msg.sender] += amount;
-        emit BalanceLocked(msg.sender, amount);
+    function lock(address user, uint256 amount) external onlyRole(GAME_CONTRACT_ROLE) {
+        require(
+            balanceOf(user) - lockedBalance[user] >= amount,
+            "Insufficient unlocked balance"
+        );
+        lockedBalance[user] += amount;
+        emit BalanceLocked(user, amount);
     }
-    
+
     /**
-     * @notice Unlock tokens
+     * @notice Unlock a user's tokens
+     * @dev Only game contracts may release locks they placed
      */
-    function unlock(uint256 amount) external {
-        require(lockedBalance[msg.sender] >= amount, "Insufficient locked");
-        lockedBalance[msg.sender] -= amount;
-        emit BalanceUnlocked(msg.sender, amount);
+    function unlock(address user, uint256 amount) external onlyRole(GAME_CONTRACT_ROLE) {
+        require(lockedBalance[user] >= amount, "Insufficient locked");
+        lockedBalance[user] -= amount;
+        emit BalanceUnlocked(user, amount);
+    }
+
+    /**
+     * @notice Pause all token transfers
+     */
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @notice Resume token transfers
+     */
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
     }
     
     /**
@@ -137,6 +157,25 @@ contract GameToken is ERC20, AccessControl, Pausable {
             "Insufficient unlocked balance"
         );
         return transfer(to, amount);
+    }
+
+    /**
+     * @dev Enforces the pause state and locked balances on all transfers
+     *      and burns. Minting is unaffected by locks.
+     */
+    function _beforeTokenTransfer(address from, address to, uint256 amount)
+        internal
+        override
+        whenNotPaused
+    {
+        super._beforeTokenTransfer(from, to, amount);
+
+        if (from != address(0)) {
+            require(
+                balanceOf(from) - lockedBalance[from] >= amount,
+                "Insufficient unlocked balance"
+            );
+        }
     }
 }
 ```
@@ -282,9 +321,11 @@ contract GameStaking is ReentrancyGuard, Ownable {
             "Lock period not ended"
         );
         
-        s.claimed = true;
+        // Compute the reward before marking the stake claimed --
+        // calculateReward returns 0 for claimed stakes
         uint256 reward = calculateReward(msg.sender, stakeId);
-        
+        s.claimed = true;
+
         require(rewardPool >= reward, "Insufficient reward pool");
         
         totalStaked -= s.amount;
@@ -697,24 +738,32 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
         
         require(req.user != address(0), "Request not found");
         require(!req.revealed, "Already revealed");
+        // Strictly after the target block: at block.number == commitBlock +
+        // REVEAL_DELAY, blockhash(commitBlock + REVEAL_DELAY) is the current
+        // block and returns 0, which would let a player who chose their
+        // entropy offline force a known outcome.
         require(
-            block.number >= req.commitBlock + REVEAL_DELAY,
+            block.number > req.commitBlock + REVEAL_DELAY,
             "Too early"
         );
+        // Expire the commit once the target blockhash leaves the 256-block
+        // window; a stale reveal must never fall through to a predictable 0.
         require(
             block.number < req.commitBlock + MAX_COMMIT_AGE,
-            "Too late - blockhash unavailable"
+            "Too late - commit expired"
         );
-        
+
         // Verify entropy matches commitment
         require(
             keccak256(abi.encodePacked(entropy)) == req.entropyHash,
             "Invalid entropy"
         );
-        
+
         // Generate randomness from future blockhash + user entropy
+        bytes32 targetHash = blockhash(req.commitBlock + REVEAL_DELAY);
+        require(targetHash != bytes32(0), "Blockhash unavailable");
         bytes32 randomness = keccak256(abi.encodePacked(
-            blockhash(req.commitBlock + REVEAL_DELAY),
+            targetHash,
             entropy,
             requestId
         ));

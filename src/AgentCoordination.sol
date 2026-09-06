@@ -44,6 +44,7 @@ contract AgentCoordination is IAgentCoordination {
 
     struct CoordinationState {
         address proposer;
+        address submitter; // account that relayed proposeCoordination (== proposer for direct EOA use)
         bytes32 payloadHash;
         Status status; // 0=PROPOSED,1=READY,2=EXECUTED,3=CANCELLED,4=EXPIRED
         uint64 expiry;
@@ -266,6 +267,7 @@ contract AgentCoordination is IAgentCoordination {
 
         // Initialize state
         st.proposer = intent.agentId;
+        st.submitter = msg.sender; // remember who relayed, so a wrapper can later relay cancellation
         st.payloadHash = pHash;
         st.status = Status.Proposed;
         st.expiry = intent.expiry;
@@ -281,6 +283,15 @@ contract AgentCoordination is IAgentCoordination {
         );
     }
 
+    /**
+     * @notice Accept a proposed coordination with a signed attestation
+     * @dev Replay protection note: the attestation binds to a specific
+     *      intentHash — which itself commits to the proposer's strictly
+     *      increasing agent nonce — and each participant may accept a given
+     *      intent at most once (see the `accepted` mapping). The signed
+     *      AcceptanceAttestation.nonce field is therefore reserved for future
+     *      extensions and is intentionally neither validated nor consumed here.
+     */
     function acceptCoordination(bytes32 intentHash, AcceptanceAttestation calldata attestation)
     external
     nonReentrant
@@ -386,14 +397,28 @@ contract AgentCoordination is IAgentCoordination {
         return (true, payload.coordinationData);
     }
 
+    /**
+     * @notice Cancel a coordination before execution
+     * @dev Before expiry, cancellation is allowed for the proposer OR for the
+     *      submitter — the account that relayed proposeCoordination. When a
+     *      wrapper contract (lobby, loot box, ...) submits an intent on the
+     *      proposer's behalf, that same wrapper may relay the proposer's
+     *      cancellation; the wrapper is trusted to enforce its own
+     *      authorization (it does — see e.g. MultiplayerGameLobby.cancelLobby).
+     *      For direct EOA use submitter == proposer, so behaviour is unchanged.
+     *      After expiry, anyone may clean up.
+     */
     function cancelCoordination(bytes32 intentHash, string calldata reason) external nonReentrant {
         CoordinationState storage st = states[intentHash];
 
         require(st.proposer != address(0), "Unknown intent");
         require(st.status < Status.Executed, "Already executed");
 
-        // Only proposer can cancel before expiry; anyone can clean up after
-        require(msg.sender == st.proposer || block.timestamp > st.expiry, "Not authorised");
+        // Proposer, or the contract that submitted the proposal, can cancel
+        // before expiry; anyone can clean up after
+        require(
+            msg.sender == st.proposer || msg.sender == st.submitter || block.timestamp > st.expiry, "Not authorised"
+        );
 
         Status finalStatus = block.timestamp > st.expiry ? Status.Expired : Status.Cancelled;
         st.status = finalStatus;

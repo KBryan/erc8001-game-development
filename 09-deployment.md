@@ -73,8 +73,8 @@ contract DeploySimpleLottery is Script {
 pragma solidity 0.8.19;
 
 import "forge-std/Script.sol";
-import "../src/GameFi/GameToken.sol";
-import "../src/GameFi/GameStaking.sol";
+import "../src/GameToken.sol";
+import "../src/GameStaking.sol";
 
 contract DeployGameFi is Script {
     struct NetworkConfig {
@@ -86,16 +86,19 @@ contract DeployGameFi is Script {
     mapping(uint256 => NetworkConfig) public configs;
     
     constructor() {
+        // Admin address comes from the environment so no key is hardcoded
+        address admin = vm.envOr("GAMEFI_ADMIN", address(0));
+
         // Base Mainnet
         configs[8453] = NetworkConfig({
-            admin: 0x..., // Your address
+            admin: admin,
             maxSupply: 1_000_000_000 ether,
             dailyMintLimit: 100_000 ether
         });
-        
+
         // Arbitrum One
         configs[42161] = NetworkConfig({
-            admin: 0x...,
+            admin: admin,
             maxSupply: 1_000_000_000 ether,
             dailyMintLimit: 100_000 ether
         });
@@ -311,17 +314,15 @@ contract PostDeployment is Script {
         // Transfer ownership
         Ownable(token).transferOwnership(newOwner);
         
-        // Grant admin role
-        AccessControl(token).grantRole(
-            keccak256("DEFAULT_ADMIN_ROLE"),
-            newOwner
-        );
-        
+        // Grant admin role.
+        // CAUTION: DEFAULT_ADMIN_ROLE is bytes32(0), NOT keccak256 of its
+        // name -- hashing the name grants a meaningless role while the
+        // deployer silently keeps real admin.
+        bytes32 adminRole = AccessControl(token).DEFAULT_ADMIN_ROLE();
+        AccessControl(token).grantRole(adminRole, newOwner);
+
         // Renounce deployer roles
-        AccessControl(token).renounceRole(
-            keccak256("DEFAULT_ADMIN_ROLE"),
-            vm.addr(deployerKey)
-        );
+        AccessControl(token).renounceRole(adminRole, vm.addr(deployerKey));
         
         vm.stopBroadcast();
     }
@@ -329,6 +330,8 @@ contract PostDeployment is Script {
 ```
 
 *Post-deployment ownership transfer*
+
+Note the way the admin role is read from the contract rather than hashed by name. OpenZeppelin's `DEFAULT_ADMIN_ROLE` is `bytes32(0)`, not `keccak256("DEFAULT_ADMIN_ROLE")` -- a script that hashes the name grants and renounces a role nobody checks, leaving the deployer silently in control while the handover appears to succeed.
 
 ### Emergency Procedures
 

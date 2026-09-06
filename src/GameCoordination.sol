@@ -43,7 +43,10 @@ contract GameCoordination is AgentCoordination {
     uint256 public constant MIN_ENTRY_FEE = 0.001 ether;
 
     /// @notice Maximum participants in tournaments
-    uint256 public constant MAX_TOURNAMENT_PLAYERS = 64;
+    /// @dev Aligned with the base coordination layer's MAX_PARTICIPANTS (32);
+    ///      a larger value would be unreachable because proposeCoordination
+    ///      caps every intent's participant list at that limit
+    uint256 public constant MAX_TOURNAMENT_PLAYERS = 32;
 
     // ============ Tournament State ============
 

@@ -95,17 +95,17 @@ contract SimplePonzi {
         address newInvestor = msg.sender;
         uint256 amount = msg.value;
         
-        // If there's a previous investor, pay them
-        if (previousInvestor != address(0)) {
-            uint256 payout = previousInvestment * MULTIPLIER_BPS / BPS_DENOMINATOR;
-            
-            // Send payout to previous investor
-            (bool success, ) = payable(previousInvestor).call{value: payout}("");
+        // Pay the investor being replaced 110% of their investment,
+        // funded by the new deposit -- the Ponzi mechanism
+        if (currentWinner != address(0)) {
+            uint256 payout = highestBid * MULTIPLIER_BPS / BPS_DENOMINATOR;
+
+            (bool success, ) = payable(currentWinner).call{value: payout}("");
             if (!success) {
-                revert PayoutFailed(previousInvestor, payout);
+                revert PayoutFailed(currentWinner, payout);
             }
-            
-            emit PayoutSent(previousInvestor, payout);
+
+            emit PayoutSent(currentWinner, payout);
         }
         
         // Update state
@@ -185,7 +185,7 @@ contract SimplePonzi {
 The contract demonstrates the Ponzi mechanism clearly:
 
 1. **Investment requirement**: Each new investor must pay 110\% of the previous investment
-2. **Immediate payout**: The previous investor receives their payout from the new deposit
+2. **Immediate payout**: The investor being replaced receives 110\% of their investment, funded directly by the new deposit
 3. **Sustainability**: Requires infinite exponential growth to pay all investors
 
 | cccc@{}}
@@ -193,12 +193,12 @@ The contract demonstrates the Ponzi mechanism clearly:
 **Round** | **Investment** | **Payout** | **New Capital Required** |
 |---|---|---|---|
 | 1 | 0.01 ETH | -- | 0.011 ETH |
-| 10 | 0.026 ETH | 0.024 ETH | 0.028 ETH |
-| 50 | 1.24 ETH | 1.13 ETH | 1.36 ETH |
-| 100 | 162 ETH | 147 ETH | 178 ETH |
-| 150 | 21,192 ETH | 19,265 ETH | 23,311 ETH |
+| 10 | 0.024 ETH | 0.024 ETH | 0.026 ETH |
+| 50 | 1.07 ETH | 1.07 ETH | 1.17 ETH |
+| 100 | 125.3 ETH | 125.3 ETH | 137.8 ETH |
+| 150 | 14,707 ETH | 14,707 ETH | 16,178 ETH |
 
-By round 150, the scheme requires over 21,000 ETH just to pay the previous investor---an amount that becomes impossible to sustain.
+By round 150, the scheme requires over 14,700 ETH just to pay the previous investor---an amount that becomes impossible to sustain.
 
 ## The Pyramid Pattern
 
@@ -409,12 +409,12 @@ contract SimplePyramid {
      * @notice Get contract statistics
      */
     function getStats() external view returns (
-        uint256 participants,
+        uint256 participantCount,
         uint256 distributed,
         uint256 creatorEarnings,
         uint256 avgLevel
     ) {
-        participants = totalParticipants;
+        participantCount = totalParticipants;
         distributed = totalDistributed;
         creatorEarnings = address(creator).balance;
         // avgLevel calculation omitted for brevity
@@ -488,6 +488,10 @@ contract PonziPyramidTest is Test {
     address public bob = address(2);
     address public carol = address(3);
     
+    // The test contract deploys the pyramid, making it the creator that
+    // receives commissions -- it must be able to accept ETH
+    receive() external payable {}
+
     function setUp() public {
         ponzi = new SimplePonzi();
         pyramid = new SimplePyramid();

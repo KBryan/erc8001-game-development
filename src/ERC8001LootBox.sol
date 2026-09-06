@@ -84,7 +84,8 @@ contract ERC8001LootBox {
      * @param organizer Address that created the loot box
      * @param participants Array of addresses who can open
      * @param itemHashes Hashes of potential items
-     * @param openFee Fee to open (distributed or burned)
+     * @param openFee Fee each participant pays to open; the collected fees are
+     *        paid to the organizer when the box is opened (entropyCallback)
      * @param opened Whether box has been opened
      * @param cancelled Whether box was cancelled
      * @param randomness Random value from Pyth (0 if not opened)
@@ -218,6 +219,13 @@ contract ERC8001LootBox {
     event OpenFeeRefunded(
         bytes32 indexed boxId,
         address indexed participant,
+        uint256 amount
+    );
+
+    /// @notice Emitted when collected open fees are paid to the organizer
+    event OpenFeesPaid(
+        bytes32 indexed boxId,
+        address indexed organizer,
         uint256 amount
     );
 
@@ -480,6 +488,18 @@ contract ERC8001LootBox {
         box.opened = true;
         box.randomness = randomness;
 
+        // Pay the collected open fees to the organizer who supplied the loot.
+        // Every participant paid openFee in agreeToOpen() and opening requires
+        // unanimous acceptance, so the pool is openFee x participant count.
+        // Uses _tryTransfer: an oracle callback must never revert on a
+        // misbehaving fee token
+        if (box.openFee > 0) {
+            uint256 fees = box.openFee * box.participants.length;
+            if (_tryTransfer(feeToken, box.organizer, fees)) {
+                emit OpenFeesPaid(boxId, box.organizer, fees);
+            }
+        }
+
         // Distribute loot based on randomness
         ItemResult[] memory items = _distributeLoot(boxId, randomness);
 
@@ -586,7 +606,11 @@ contract ERC8001LootBox {
 
     /**
      * @notice Cancel loot box and refund fees
-     * @dev Can be called by organizer or if expired
+     * @dev Can be called by organizer or if expired. The inner
+     *      cancelCoordination() call succeeds because this contract submitted
+     *      the proposal and AgentCoordination lets the submitting contract
+     *      relay the proposer's cancellation; this function enforces the
+     *      organizer-only (or expired) authorization before relaying
      * @param boxId Loot box ID
      * @param reason Cancellation reason
      */

@@ -55,7 +55,7 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
     
     /**
      * @notice Place a bet by committing a hash
-     * @param target Roll under this number (1-99) to win
+     * @param target Roll under this number (2-98) to win
      */
     function placeBet(uint8 target) external payable returns (bytes32 commitHash) {
         // Target 99 is excluded: at 2% house edge its payout would exactly
