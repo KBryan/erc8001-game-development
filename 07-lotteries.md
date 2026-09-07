@@ -13,14 +13,14 @@ Lotteries are among the most popular blockchain gaming applications. They combin
 
 ## SimpleLottery: Commit-Reveal RNG
 
-The commit-reveal pattern provides cryptographically secure randomness without external oracle dependency.
+The commit-reveal pattern provides randomness without external oracle dependency, and honest participants get a fair draw. It is not manipulation-proof, however: the last participant to reveal can compute the final seed before deciding whether to reveal at all, and this contract imposes no penalty for withholding a reveal---production systems need reveal bonds or forfeiture penalties, or should use a VRF instead. Note also that `enter()` allows only one entry per address (buy multiple tickets in a single call): the winning seed XORs together every entry's revealed number, so a participant appearing twice would XOR their own contribution back out of the seed.
 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -75,7 +75,7 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         uint256 _minEntries,
         uint256 _commitDuration,
         uint256 _revealDuration
-    ) {
+    ) Ownable(msg.sender) {
         ticketPrice = _ticketPrice;
         minEntries = _minEntries;
         commitDuration = _commitDuration;
@@ -91,7 +91,12 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         require(phase == Phase.Open, "Not open");
         require(msg.value == ticketPrice * ticketCount, "Incorrect payment");
         require(ticketCount > 0, "Must buy at least 1 ticket");
-        
+        // One entry per address: drawWinner XORs each entry's revealed
+        // number into the seed, so a participant appearing twice would XOR
+        // their own contribution back out and erase it from the accumulator.
+        // Buy multiple tickets in a single entry instead.
+        require(!_isParticipant(msg.sender), "Already entered");
+
         entries.push(Entry({
             participant: msg.sender,
             amount: msg.value,
@@ -257,9 +262,9 @@ For continuous operation, lotteries need automated rollover mechanisms. Note tha
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@chainlink/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
 
@@ -315,7 +320,7 @@ contract RecurringLottery is
         uint256 _minPot,
         uint256 _rolloverPercent,
         uint256 _houseFeePercent
-    ) {
+    ) Ownable(msg.sender) {
         config = Config({
             ticketPrice: _ticketPrice,
             roundDuration: _roundDuration,
@@ -489,9 +494,9 @@ Prize claiming is deliberately split into two phases. A naive design that pays e
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -570,7 +575,7 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         uint256 amount
     );
     
-    constructor() {
+    constructor() Ownable(msg.sender) {
         nextDrawTime = block.timestamp + drawInterval;
     }
     
@@ -810,102 +815,108 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
 
 For production use, integrate Chainlink VRF for verifiable randomness.
 
-> **Version note.** This example targets Chainlink VRF v2; the current release is VRF v2.5, which replaces `VRFConsumerBaseV2` with `VRFConsumerBaseV2Plus`, widens subscription IDs from `uint64` to `uint256`, and adds the option to pay fees in native ETH instead of LINK. The migration is mechanical---the request/fulfill flow shown here is unchanged.
+> **Version note.** This example targets Chainlink VRF v2.5. Compared to v2, the consumer base contract is `VRFConsumerBaseV2Plus` (which exposes the coordinator as `s_vrfCoordinator` and brings its own `ConfirmedOwner`), subscription IDs are `uint256` rather than `uint64`, and `requestRandomWords` takes a single `RandomWordsRequest` struct whose `extraArgs` carries a `nativePayment` flag---set it to `true` to pay VRF fees in native ETH instead of LINK.
 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@chainlink/contracts/src/v0.8/vrf/VRFConsumerBaseV2.sol";
-import "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 
 /**
  * @title VRFUpgradedLottery
- * @notice Lottery using Chainlink VRF v2 for secure randomness
+ * @notice Lottery using Chainlink VRF v2.5 for secure randomness
+ * @dev VRFConsumerBaseV2Plus exposes the coordinator as `s_vrfCoordinator`
+ *      and brings its own ConfirmedOwner (onlyOwner) with it.
  */
-contract VRFUpgradedLottery is VRFConsumerBaseV2 {
-    VRFCoordinatorV2Interface public coordinator;
-    
+contract VRFUpgradedLottery is VRFConsumerBaseV2Plus {
     bytes32 public keyHash;
-    uint64 public subscriptionId;
+    uint256 public subscriptionId; // v2.5 subscription ids are uint256
     uint32 public callbackGasLimit = 100000;
     uint16 public requestConfirmations = 3;
-    
+
     struct RequestStatus {
         bool fulfilled;
         bool exists;
         uint256[] randomWords;
         uint256 drawId;
     }
-    
+
     mapping(uint256 => RequestStatus) public requests;
     uint256 public lastRequestId;
-    
+
     // Lottery state
     mapping(uint256 => uint256) public drawToRequest;
     bool public drawPending;
-    
+
     event RandomnessRequested(uint256 requestId, uint256 drawId);
     event RandomnessFulfilled(uint256 requestId, uint256[] randomWords);
-    
+
     constructor(
         address _vrfCoordinator,
         bytes32 _keyHash,
-        uint64 _subId
-    ) VRFConsumerBaseV2(_vrfCoordinator) {
-        coordinator = VRFCoordinatorV2Interface(_vrfCoordinator);
+        uint256 _subId
+    ) VRFConsumerBaseV2Plus(_vrfCoordinator) {
         keyHash = _keyHash;
         subscriptionId = _subId;
     }
-    
+
     /**
      * @notice Request randomness for a draw
      */
     function requestRandomness(uint256 drawId) external returns (uint256 requestId) {
         require(!drawPending, "Draw in progress");
-        
-        requestId = coordinator.requestRandomWords(
-            keyHash,
-            subscriptionId,
-            requestConfirmations,
-            callbackGasLimit,
-            1 // Request 1 random number
+
+        requestId = s_vrfCoordinator.requestRandomWords(
+            VRFV2PlusClient.RandomWordsRequest({
+                keyHash: keyHash,
+                subId: subscriptionId,
+                requestConfirmations: requestConfirmations,
+                callbackGasLimit: callbackGasLimit,
+                numWords: 1, // Request 1 random number
+                // nativePayment: true would pay VRF fees in native ETH
+                // instead of LINK -- a v2.5 addition.
+                extraArgs: VRFV2PlusClient._argsToBytes(
+                    VRFV2PlusClient.ExtraArgsV1({nativePayment: false})
+                )
+            })
         );
-        
+
         requests[requestId] = RequestStatus({
             fulfilled: false,
             exists: true,
             randomWords: new uint256[](0),
             drawId: drawId
         });
-        
+
         drawToRequest[drawId] = requestId;
         drawPending = true;
         lastRequestId = requestId;
-        
+
         emit RandomnessRequested(requestId, drawId);
     }
-    
+
     /**
      * @notice VRF callback with random numbers
      */
-    function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords)
+    function fulfillRandomWords(uint256 requestId, uint256[] calldata randomWords)
         internal
         override
     {
         require(requests[requestId].exists, "Request not found");
-        
+
         requests[requestId].fulfilled = true;
         requests[requestId].randomWords = randomWords;
         drawPending = false;
-        
+
         // Process the draw with verified randomness
         _completeDraw(requests[requestId].drawId, randomWords[0]);
-        
+
         emit RandomnessFulfilled(requestId, randomWords);
     }
-    
+
     function _completeDraw(uint256 drawId, uint256 randomness) internal {
         // Implement winner selection using verified randomness
         // randomness is cryptographically secure from Chainlink

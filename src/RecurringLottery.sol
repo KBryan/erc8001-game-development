@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@chainlink/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
 
@@ -57,7 +57,7 @@ contract RecurringLottery is
         uint256 _minPot,
         uint256 _rolloverPercent,
         uint256 _houseFeePercent
-    ) {
+    ) Ownable(msg.sender) {
         config = Config({
             ticketPrice: _ticketPrice,
             roundDuration: _roundDuration,

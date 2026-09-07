@@ -87,7 +87,7 @@ Introduced in Solidity 0.8.4, custom errors provide a gas-efficient alternative 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 contract GamingErrors {
     // Custom error declarations
@@ -383,7 +383,7 @@ Note the selector handling: `0x90b8ec18` is `bytes4(keccak256("TransferFailed()"
 
 ## Best Practices Summary
 
-1. **Use Solidity 0.8.19+** for latest optimizations and security fixes
+1. **Use Solidity 0.8.26** for latest optimizations and security fixes
 2. **Employ custom errors** for all revert conditions
 3. **Apply unchecked blocks** strategically in loops and safe arithmetic
 4. **Pack storage variables** to minimize slot usage

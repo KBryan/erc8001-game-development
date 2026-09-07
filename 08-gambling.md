@@ -18,14 +18,14 @@ Because the player's expected value is negative, the house edge comes out as a p
 
 ## SatoshiDice: Modernized
 
-SatoshiDice was the first Bitcoin gambling game. This Ethereum implementation uses commit-reveal for fairness.
+SatoshiDice was the first Bitcoin gambling game. This Ethereum implementation splits each bet into a place and a reveal step, but note that despite the `commitHash` name this is not a true commit-reveal scheme: the hash is derived entirely from public values (sender, block number, bet amount, target, timestamp) with no player-chosen secret, so it serves as a bet identifier rather than a cryptographic commitment. Fairness rests entirely on the unpredictability of a future blockhash---which a block proposer can influence---making this fine for teaching but a job for a VRF in production.
 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -76,7 +76,9 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
     );
     event FundsDeposited(address from, uint256 amount);
     event FundsWithdrawn(address to, uint256 amount);
-    
+
+    constructor() Ownable(msg.sender) {}
+
     /**
      * @notice Place a bet by committing a hash
      * @param target Roll under this number (2-98) to win
@@ -270,9 +272,9 @@ European roulette with single zero, supporting multiple bet types. This contract
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -341,7 +343,7 @@ contract Roulette is ReentrancyGuard, Ownable {
         bool isRed
     );
     
-    constructor() {
+    constructor() Ownable(msg.sender) {
         // Initialize red numbers
         uint8[18] memory reds = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36];
         for (uint256 i = 0; i < reds.length; i++) {
@@ -602,13 +604,17 @@ Where:
 
 ## Responsible Gaming Features
 
+Limits only protect players if they are actually enforced before a wager is accepted: the modifier below checks the player's own daily wager limit and loss limit (both self-set) alongside the global cap, and game contracts report losing bets back through `_recordLoss` so the loss accounting stays current.
+
 ```solidity
 
 abstract contract ResponsibleGaming {
     
     mapping(address => uint256) public dailyWagered;
+    mapping(address => uint256) public dailyLosses;
     mapping(address => uint256) public lastWagerReset;
-    mapping(address => uint256) public lossLimit;
+    mapping(address => uint256) public dailyLimit; // Per-player wager cap (0 = unset)
+    mapping(address => uint256) public lossLimit;  // Per-player loss cap (0 = unset)
     mapping(address => bool) public selfExcluded;
     
     uint256 public globalDailyLimit = 100 ether;
@@ -617,24 +623,51 @@ abstract contract ResponsibleGaming {
     modifier responsibleGaming(address player, uint256 amount) {
         require(!selfExcluded[player], "Self-excluded");
         
-        // Reset daily counter if needed
+        // Reset daily counters if needed
         if (block.timestamp > lastWagerReset[player] + 1 days) {
             dailyWagered[player] = 0;
+            dailyLosses[player] = 0;
             lastWagerReset[player] = block.timestamp;
         }
         
+        // The player's own daily limit applies if they set one;
+        // the global cap always applies
+        if (dailyLimit[player] > 0) {
+            require(
+                dailyWagered[player] + amount <= dailyLimit[player],
+                "Player daily limit exceeded"
+            );
+        }
         require(
             dailyWagered[player] + amount <= globalDailyLimit,
             "Daily limit exceeded"
         );
         
-        _;
+        // A wager risks losing its full amount: refuse it if that
+        // would breach the player's self-set loss limit
+        if (lossLimit[player] > 0) {
+            require(
+                dailyLosses[player] + amount <= lossLimit[player],
+                "Loss limit exceeded"
+            );
+        }
         
         dailyWagered[player] += amount;
+        
+        _;
+    }
+    
+    /// @dev Child contracts call this when a settled bet loses
+    function _recordLoss(address player, uint256 amount) internal {
+        dailyLosses[player] += amount;
     }
     
     function selfExclude() external {
         selfExcluded[msg.sender] = true;
+    }
+    
+    function setDailyLimit(uint256 limit) external {
+        dailyLimit[msg.sender] = limit;
     }
     
     function setLossLimit(uint256 limit) external {

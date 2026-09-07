@@ -4,7 +4,7 @@ A comprehensive guide to developing blockchain-based games using modern Ethereum
 
 **Author:** Blockchain Gaming Research Group  
 **Edition:** 2026 Edition  
-**Solidity Version:** 0.8.19+
+**Solidity Version:** 0.8.26
 
 ## Overview
 
@@ -21,7 +21,7 @@ This book covers the complete journey of building games on Ethereum, from settin
 
 | Feature | 2018 Edition | 2026 Edition |
 |---------|-------------|--------------|
-| Solidity Version | 0.4.15–0.4.25 | 0.8.19+ |
+| Solidity Version | 0.4.15–0.4.25 | 0.8.26 |
 | Development Framework | Truffle Suite | Foundry |
 | Testing Framework | JavaScript/Truffle | Solidity/Foundry |
 | Primary Network | Ethereum Mainnet | L2 (Base, Arbitrum, Optimism) |
@@ -118,7 +118,7 @@ pandoc README.md 01-introduction.md 02-foundry-setup.md        03-modern-solidit
 
 | Component | Tool |
 |-----------|------|
-| Language | Solidity 0.8.19+ |
+| Language | Solidity 0.8.26 |
 | Framework | Foundry |
 | Build Tool | Forge |
 | Local Node | Anvil |

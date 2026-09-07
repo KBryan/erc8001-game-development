@@ -104,7 +104,7 @@ For complex contracts with multiple external calls, use OpenZeppelin's Reentranc
 
 ```solidity
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 contract ProtectedGame is ReentrancyGuard {
     mapping(address => uint256) public balances;

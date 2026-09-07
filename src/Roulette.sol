@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -70,7 +70,7 @@ contract Roulette is ReentrancyGuard, Ownable {
         bool isRed
     );
     
-    constructor() {
+    constructor() Ownable(msg.sender) {
         // Initialize red numbers
         uint8[18] memory reds = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36];
         for (uint256 i = 0; i < reds.length; i++) {

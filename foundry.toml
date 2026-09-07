@@ -4,8 +4,9 @@ test = "test"
 script = "script"
 out = "out"
 libs = ["lib"]
-# Paris keeps bytecode compatible with every chain the book targets and
-# with both solc lines used in the repo (0.8.19 and ^0.8.26).
+# Paris keeps bytecode compatible with every chain the book targets
+# (no PUSH0, which solc 0.8.20+ would otherwise emit). All sources are
+# unified at pragma ^0.8.26.
 evm_version = "paris"
 
 [fuzz]

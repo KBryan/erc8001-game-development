@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -52,7 +52,9 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
     );
     event FundsDeposited(address from, uint256 amount);
     event FundsWithdrawn(address to, uint256 amount);
-    
+
+    constructor() Ownable(msg.sender) {}
+
     /**
      * @notice Place a bet by committing a hash
      * @param target Roll under this number (2-98) to win

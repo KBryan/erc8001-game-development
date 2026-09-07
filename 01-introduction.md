@@ -23,7 +23,7 @@ The technological landscape has shifted dramatically. The comparison table below
 
 **Feature** | **2018 Edition** | **2026 Edition** |
 |---|---|---|
-| Solidity Version | 0.4.15--0.4.25 | 0.8.19+ |
+| Solidity Version | 0.4.15--0.4.25 | 0.8.26 |
 | Development Framework | Truffle Suite | Foundry |
 | Testing Framework | JavaScript/Truffle | Solidity/Foundry |
 | Primary Network | Ethereum Mainnet | L2 (Base, Arbitrum, Optimism) |

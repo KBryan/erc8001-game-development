@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -56,7 +56,7 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         uint256 _minEntries,
         uint256 _commitDuration,
         uint256 _revealDuration
-    ) {
+    ) Ownable(msg.sender) {
         ticketPrice = _ticketPrice;
         minEntries = _minEntries;
         commitDuration = _commitDuration;
@@ -72,7 +72,12 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         require(phase == Phase.Open, "Not open");
         require(msg.value == ticketPrice * ticketCount, "Incorrect payment");
         require(ticketCount > 0, "Must buy at least 1 ticket");
-        
+        // One entry per address: drawWinner XORs each entry's revealed
+        // number into the seed, so a participant appearing twice would XOR
+        // their own contribution back out and erase it from the accumulator.
+        // Buy multiple tickets in a single entry instead.
+        require(!_isParticipant(msg.sender), "Already entered");
+
         entries.push(Entry({
             participant: msg.sender,
             amount: msg.value,

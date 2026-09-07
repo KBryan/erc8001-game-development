@@ -22,13 +22,13 @@ The following contract implements a basic Ponzi mechanism:
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 /**
  * @title SimplePonzi
  * @notice EDUCATIONAL PURPOSES ONLY - DO NOT DEPLOY WITH REAL VALUE
  * @dev A minimal Ponzi scheme implementation demonstrating the pattern
- * 
+ *
  * WARNING: This contract is mathematically guaranteed to collapse.
  * Early investors are paid from later investors' deposits.
  * The last investors will lose all their money.
@@ -38,7 +38,7 @@ contract SimplePonzi {
     error InsufficientInvestment();
     error PayoutFailed(address recipient, uint256 amount);
     error NoPreviousInvestor();
-    
+
     // ============ Events ============
     event Invested(
         address indexed investor,
@@ -50,33 +50,33 @@ contract SimplePonzi {
         address indexed recipient,
         uint256 amount
     );
-    
+
     // ============ State Variables ============
     /// @notice The current highest bidder (most recent investor)
     address public currentWinner;
-    
+
     /// @notice The current investment amount required
     uint256 public highestBid;
-    
+
     /// @notice Previous investor who receives the payout
     address public previousInvestor;
-    
+
     /// @notice Amount previous investor paid (for ROI calculation)
     uint256 public previousInvestment;
-    
+
     /// @notice Total ETH invested in the contract
     uint256 public totalInvested;
-    
+
     /// @notice Number of investors
     uint256 public investorCount;
-    
+
     /// @notice Minimum initial investment
     uint256 public constant MIN_INITIAL_INVESTMENT = 0.01 ether;
-    
+
     /// @notice Multiplier for next required investment (110% of previous)
     uint256 public constant MULTIPLIER_BPS = 11000; // 10000 = 100%
     uint256 public constant BPS_DENOMINATOR = 10000;
-    
+
     // ============ Modifiers ============
     modifier validInvestment() {
         if (msg.value < _getMinimumInvestment()) {
@@ -84,9 +84,9 @@ contract SimplePonzi {
         }
         _;
     }
-    
+
     // ============ External Functions ============
-    
+
     /**
      * @notice Invest ETH to become the current winner
      * @dev The previous investor receives 110% of their investment
@@ -94,7 +94,7 @@ contract SimplePonzi {
     function invest() external payable validInvestment {
         address newInvestor = msg.sender;
         uint256 amount = msg.value;
-        
+
         // Pay the investor being replaced 110% of their investment,
         // funded by the new deposit -- the Ponzi mechanism
         if (currentWinner != address(0)) {
@@ -107,22 +107,22 @@ contract SimplePonzi {
 
             emit PayoutSent(currentWinner, payout);
         }
-        
+
         // Update state
         previousInvestor = currentWinner;
         previousInvestment = highestBid;
         currentWinner = newInvestor;
         highestBid = amount;
-        
+
         unchecked {
             totalInvested += amount;
             investorCount++;
         }
-        
+
         uint256 nextPayout = amount * MULTIPLIER_BPS / BPS_DENOMINATOR;
         emit Invested(newInvestor, previousInvestor, amount, nextPayout);
     }
-    
+
     /**
      * @notice Get the minimum investment required for the next investor
      * @return minimum The minimum ETH required
@@ -130,7 +130,7 @@ contract SimplePonzi {
     function getMinimumInvestment() external view returns (uint256 minimum) {
         return _getMinimumInvestment();
     }
-    
+
     /**
      * @notice Calculate potential return on investment
      * @param amount The investment amount
@@ -139,7 +139,7 @@ contract SimplePonzi {
     function calculateROI(uint256 amount) external pure returns (uint256 payout) {
         return amount * MULTIPLIER_BPS / BPS_DENOMINATOR;
     }
-    
+
     /**
      * @notice Get the current contract state summary
      */
@@ -158,18 +158,18 @@ contract SimplePonzi {
             investorCount
         );
     }
-    
+
     // ============ Internal Functions ============
-    
+
     function _getMinimumInvestment() internal view returns (uint256) {
         if (highestBid == 0) {
             return MIN_INITIAL_INVESTMENT;
         }
         return highestBid * MULTIPLIER_BPS / BPS_DENOMINATOR;
     }
-    
+
     // ============ Receive ============
-    
+
     receive() external payable {
         revert("Use invest() function");
     }
@@ -209,13 +209,13 @@ Pyramid schemes reward participants for recruiting new members, creating a hiera
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 /**
  * @title SimplePyramid
  * @notice EDUCATIONAL PURPOSES ONLY - DO NOT DEPLOY WITH REAL VALUE
  * @dev A minimal pyramid scheme implementation demonstrating the pattern
- * 
+ *
  * WARNING: This contract requires exponential recruitment to sustain.
  * Participants at the bottom of the pyramid will lose their investment.
  */
@@ -227,7 +227,7 @@ contract SimplePyramid {
     error ParentNotParticipating();
     error PyramidCollapsed();
     error TransferFailed();
-    
+
     // ============ Events ============
     event Joined(
         address indexed participant,
@@ -242,7 +242,7 @@ contract SimplePyramid {
         uint8 tier
     );
     event PayoutSent(address indexed recipient, uint256 amount);
-    
+
     // ============ Structs ============
     struct Participant {
         address parent;
@@ -252,37 +252,37 @@ contract SimplePyramid {
         uint8 level;
         bool exists;
     }
-    
+
     // ============ State Variables ============
     /// @notice Minimum entry fee
     uint256 public constant ENTRY_FEE = 0.1 ether;
-    
+
     /// @notice Maximum depth for commission payouts
     uint8 public constant MAX_DEPTH = 5;
-    
+
     /// @notice Commission percentages for each level (in basis points)
     uint16[MAX_DEPTH] public commissionRates = [2000, 1500, 1000, 500, 200];
     // 20%, 15%, 10%, 5%, 2%
-    
+
     /// @notice Participant data
     mapping(address => Participant) public participants;
-    
+
     /// @notice Total participants
     uint256 public totalParticipants;
-    
+
     /// @notice Total ETH distributed
     uint256 public totalDistributed;
-    
+
     /// @notice Contract creator (receives remaining fees)
     address public immutable creator;
-    
+
     /// @notice Maximum participants before collapse risk
     uint256 public constant MAX_PARTICIPANTS = 10000;
-    
+
     // ============ Constructor ============
     constructor() {
         creator = msg.sender;
-        
+
         // Creator is first participant at level 0
         participants[creator] = Participant({
             parent: address(0),
@@ -292,12 +292,12 @@ contract SimplePyramid {
             level: 0,
             exists: true
         });
-        
+
         totalParticipants = 1;
     }
-    
+
     // ============ External Functions ============
-    
+
     /**
      * @notice Join the pyramid by paying entry fee
      * @param parent The address who referred you
@@ -315,34 +315,34 @@ contract SimplePyramid {
         if (totalParticipants >= MAX_PARTICIPANTS) {
             revert PyramidCollapsed();
         }
-        
+
         address current = parent;
         uint256 remainingFee = msg.value;
-        
+
         // Pay commissions up the chain
         for (uint8 i = 0; i < MAX_DEPTH; i++) {
             if (current == address(0)) break;
-            
+
             uint256 commission = msg.value * commissionRates[i] / 10000;
             if (commission > 0 && commission <= remainingFee) {
                 (bool success, ) = payable(current).call{value: commission}("");
                 if (!success) revert TransferFailed();
-                
+
                 participants[current].totalEarned += commission;
                 remainingFee -= commission;
-                
+
                 emit CommissionPaid(current, msg.sender, commission, i + 1);
             }
-            
+
             current = participants[current].parent;
         }
-        
+
         // Creator gets remainder
         if (remainingFee > 0) {
             (bool success, ) = payable(creator).call{value: remainingFee}("");
             if (!success) revert TransferFailed();
         }
-        
+
         // Record new participant
         uint8 newLevel = participants[parent].level + 1;
         participants[msg.sender] = Participant({
@@ -353,24 +353,24 @@ contract SimplePyramid {
             level: newLevel,
             exists: true
         });
-        
+
         unchecked {
             participants[parent].referrals++;
             totalParticipants++;
         }
-        
+
         totalDistributed += msg.value - remainingFee;
-        
+
         emit Joined(msg.sender, parent, msg.value, newLevel);
     }
-    
+
     /**
      * @notice Get participant details
      */
     function getParticipant(address user) external view returns (Participant memory) {
         return participants[user];
     }
-    
+
     /**
      * @notice Calculate potential earnings from referrals
      */
@@ -384,11 +384,11 @@ contract SimplePyramid {
             for (uint8 i = 1; i < level; i++) {
                 peopleAtLevel *= avgReferralsPerPerson;
             }
-            
+
             totalEarnings += peopleAtLevel * ENTRY_FEE * commissionRates[level - 1] / 10000;
         }
     }
-    
+
     /**
      * @notice Check if pyramid is sustainable
      */
@@ -402,7 +402,7 @@ contract SimplePyramid {
         }
         return requiredForCurrent < MAX_PARTICIPANTS;
     }
-    
+
     /**
      * @notice Get contract statistics
      */
@@ -417,7 +417,7 @@ contract SimplePyramid {
         creatorEarnings = address(creator).balance;
         // avgLevel calculation omitted for brevity
     }
-    
+
     // ============ Receive ============
     receive() external payable {
         revert("Use join() function");
@@ -470,7 +470,7 @@ Studying these patterns helps developers:
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
 import "../src/SimplePonzi.sol";

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -80,7 +80,7 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         uint256 amount
     );
     
-    constructor() {
+    constructor() Ownable(msg.sender) {
         nextDrawTime = block.timestamp + drawInterval;
     }
     

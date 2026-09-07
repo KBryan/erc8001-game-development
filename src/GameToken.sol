@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title GameToken
@@ -81,7 +81,7 @@ contract GameToken is ERC20, AccessControl, Pausable {
     /**
      * @notice Lock a user's tokens for in-game activities
      * @dev Only game contracts may lock; locks are enforced on every
-     *      transfer via _beforeTokenTransfer
+     *      transfer via _update
      */
     function lock(address user, uint256 amount) external onlyRole(GAME_CONTRACT_ROLE) {
         require(
@@ -141,19 +141,23 @@ contract GameToken is ERC20, AccessControl, Pausable {
     /**
      * @dev Enforces the pause state and locked balances on all transfers
      *      and burns. Minting is unaffected by locks.
+     *      OZ v5 replaced the _beforeTokenTransfer/_afterTokenTransfer hooks
+     *      with a single _update override; balances are still untouched here
+     *      until super._update runs, so the unlocked-balance check reads
+     *      pre-transfer state.
      */
-    function _beforeTokenTransfer(address from, address to, uint256 amount)
+    function _update(address from, address to, uint256 value)
         internal
         override
         whenNotPaused
     {
-        super._beforeTokenTransfer(from, to, amount);
-
         if (from != address(0)) {
             require(
-                balanceOf(from) - lockedBalance[from] >= amount,
+                balanceOf(from) - lockedBalance[from] >= value,
                 "Insufficient unlocked balance"
             );
         }
+
+        super._update(from, to, value);
     }
 }

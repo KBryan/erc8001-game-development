@@ -80,7 +80,7 @@ src = "src"
 test = "test"
 script = "script"
 libs = ["lib"]
-solc = "0.8.19"
+solc = "0.8.26"
 optimizer = true
 optimizer_runs = 200
 verbosity = 3
@@ -146,7 +146,7 @@ Foundry tests are written in Solidity, eliminating language context switching:
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
 import "../src/SimplePonzi.sol";
@@ -331,7 +331,7 @@ Foundry uses git submodules for dependency management:
 forge install OpenZeppelin/openzeppelin-contracts
 
 # Install specific version
-forge install OpenZeppelin/openzeppelin-contracts@v4.9.6
+forge install OpenZeppelin/openzeppelin-contracts@v5.7.0
 
 # Update dependencies
 forge update
@@ -342,7 +342,7 @@ forge remove openzeppelin-contracts
 
 *Dependency management with Forge*
 
-> **Version note**: This book pins OpenZeppelin v4.9.x. OpenZeppelin v5 moved `ReentrancyGuard` and `Pausable` from `contracts/security/` to `contracts/utils/`, and `Ownable`'s constructor now takes an `initialOwner` argument. Readers using v5 must adjust imports and constructors accordingly.
+> **Version note**: This book pins OpenZeppelin v5. If you maintain an older v4 codebase, note the reverse mapping: v4 kept `ReentrancyGuard` and `Pausable` under `contracts/security/` (v5 moved them to `contracts/utils/`), and v4's `Ownable` constructor took no arguments (v5 requires an `initialOwner`). Readers on v4 must adjust imports and constructors accordingly.
 
 Remappings in `foundry.toml` map imports to installed dependencies:
 
@@ -360,7 +360,7 @@ remappings = [
 
 ## Best Practices
 
-1. **Always use specific Solidity versions**: Pin `pragma solidity 0.8.19;` for reproducibility.
+1. **Always use specific Solidity versions**: Pin `pragma solidity ^0.8.26;` for reproducibility.
 2. **Enable optimizer**: Set `optimizer = true` with appropriate `optimizer_runs` for your use case.
 3. **Test thoroughly**: Aim for high coverage with unit, fuzz, and integration tests.
 4. **Use gas snapshots**: Track gas changes with `forge snapshot` and `forge snapshot --diff`.

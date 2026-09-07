@@ -35,7 +35,7 @@ With Ethereum mainnet gas costs at 20--100 gwei, a simple bet costing 50,000 gas
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Script.sol";
 import "../src/SimpleLottery.sol";
@@ -69,7 +69,7 @@ contract DeploySimpleLottery is Script {
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Script.sol";
 import "../src/GameToken.sol";
@@ -296,7 +296,7 @@ forge script script/Deploy.s.sol \
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Script.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";

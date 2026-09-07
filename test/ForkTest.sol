@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
 
@@ -25,10 +25,11 @@ contract ForkTest is Test {
         );
         
         (uint112 reserve0, uint112 reserve1,) = wethUsdc.getReserves();
-        
-        // WETH is token0, USDC is token1
-        uint256 price = (uint256(reserve1) * 1e18) / reserve0;
-        
+
+        // USDC is token0, WETH is token1 (USDC's address sorts below WETH's),
+        // so the WETH price in USDC (6 decimals) is reserve0 / reserve1
+        uint256 price = (uint256(reserve0) * 1e18) / reserve1;
+
         assertGt(price, 1000 * 1e6, "WETH should be > $1000");
     }
     
