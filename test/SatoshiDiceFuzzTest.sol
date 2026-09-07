@@ -52,9 +52,7 @@ contract SatoshiDiceFuzzTest is Test {
     function testFuzz_ContractBalanceInvariant(uint256 seed) public {
         vm.deal(address(this), 10 ether);
         dice.deposit{value: 10 ether}();
-        
-        uint256 initialBalance = address(dice).balance;
-        
+
         // Simulate many bets
         for (uint256 i = 0; i < 100; i++) {
             uint8 target = uint8(bound(uint256(keccak256(abi.encode(seed, i))), 2, 99));
@@ -74,5 +72,30 @@ contract SatoshiDiceFuzzTest is Test {
     
     function placeBetExternal(uint8 target) external payable {
         dice.placeBet(target);
+    }
+
+    /**
+     * @notice Fuzz test: an underfunded bankroll must reject the bet upfront
+     * @dev Regression test for a check that subtracted msg.value from the
+     *      balance -- which already contains msg.value -- letting a bet
+     *      through (e.g. 1 ether at target 50, payout exactly 2 ether, on an
+     *      empty bankroll) whose win could never be paid, bricking revealBet.
+     */
+    function testFuzz_RejectBetWhenBankrollCannotCoverPayout(
+        uint8 target,
+        uint256 amount
+    ) public {
+        target = uint8(bound(target, 2, 98));
+        amount = bound(amount, 0.001 ether, 1 ether);
+
+        // Fresh game with an empty bankroll: its only balance is the bet
+        // itself, and every valid payout exceeds the bet
+        SatoshiDice emptyDice = new SatoshiDice();
+        assertEq(address(emptyDice).balance, 0);
+        assertGt(emptyDice.calculatePayout(amount, target), amount);
+
+        vm.deal(address(this), amount);
+        vm.expectRevert("Insufficient contract balance");
+        emptyDice.placeBet{value: amount}(target);
     }
 }

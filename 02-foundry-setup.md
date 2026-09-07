@@ -81,8 +81,14 @@ test = "test"
 script = "script"
 libs = ["lib"]
 solc = "0.8.26"
+# The optimizer is off by default in Foundry; without it GameCoordination
+# exceeds the EIP-170 24,576-byte runtime limit.
 optimizer = true
 optimizer_runs = 200
+# Cancun is supported on every chain the book targets (mainnet, Base,
+# Arbitrum, Optimism) and is required by OpenZeppelin v5's cryptography
+# libraries, which use the mcopy opcode. Sources are unified at ^0.8.26.
+evm_version = "cancun"
 verbosity = 3
 
 # Gas reporting
@@ -111,6 +117,8 @@ arbitrum = "${ARBITRUM_RPC_URL}"
 ```
 
 *Production-ready foundry.toml configuration*
+
+Two settings deserve special attention. Foundry ships with the optimizer *disabled* by default, and EIP-170 caps deployed runtime bytecode at 24,576 bytes---larger contracts such as this book's `GameCoordination` simply will not deploy without optimization. Setting `evm_version = "cancun"` matters because OpenZeppelin v5's cryptography libraries emit the `mcopy` opcode, which pre-Cancun chains do not understand.
 
 <a id="lst:foundry-config"></a>
 

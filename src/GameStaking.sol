@@ -52,6 +52,12 @@ contract GameStaking is ReentrancyGuard, Ownable {
         uint256 stakeId
     );
     event RewardAdded(uint256 amount);
+    event EmergencyUnstaked(
+        address indexed user,
+        uint256 amount,
+        uint256 forfeitedReward,
+        uint256 stakeId
+    );
 
     constructor(address _stakingToken, address _rewardToken) Ownable(msg.sender) {
         stakingToken = IERC20(_stakingToken);
@@ -143,6 +149,35 @@ contract GameStaking is ReentrancyGuard, Ownable {
         rewardToken.safeTransfer(msg.sender, reward);
 
         emit Unstaked(msg.sender, s.amount, reward, stakeId);
+    }
+
+    /**
+     * @notice Withdraw principal only after the lock period, forfeiting all rewards
+     * @dev Escape hatch for when the reward pool is underfunded: unstake()
+     *      reverts if rewardPool cannot cover the earned reward, which would
+     *      otherwise freeze principal until the owner calls addRewards. Use
+     *      this only when you accept losing the reward -- the forfeited
+     *      amount stays in the reward pool for other stakers.
+     */
+    function emergencyUnstake(uint256 stakeId) external nonReentrant {
+        require(stakeId < userStakes[msg.sender].length, "Invalid stake ID");
+
+        Stake storage s = userStakes[msg.sender][stakeId];
+        require(!s.claimed, "Already claimed");
+        require(
+            block.timestamp >= s.startTime + s.duration,
+            "Lock period not ended"
+        );
+
+        // Record what is being given up before marking the stake claimed
+        uint256 forfeited = calculateReward(msg.sender, stakeId);
+        s.claimed = true;
+
+        totalStaked -= s.amount;
+
+        stakingToken.safeTransfer(msg.sender, s.amount);
+
+        emit EmergencyUnstaked(msg.sender, s.amount, forfeited, stakeId);
     }
 
     /**

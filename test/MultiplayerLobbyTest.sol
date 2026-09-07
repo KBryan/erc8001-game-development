@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
+import {AgentCoordination} from "../src/AgentCoordination.sol";
 import {GameCoordination} from "../src/GameCoordination.sol";
 import {MultiplayerGameLobby} from "../src/MultiplayerGameLobby.sol";
 import {AgentIntent, AcceptanceAttestation, CoordinationPayload, Status} from "../src/IAgentCoordination.sol";
@@ -116,7 +117,14 @@ contract MultiplayerLobbyTest is Test {
         host = players[0];
         hostKey = playerKeys[0];
 
-        // Fund every player and approve the lobby for entry fees
+        // Host approves the lobby as their relayer on the coordination
+        // contract — required once before the lobby may submit proposals on
+        // the host's behalf (proposeCoordination rejects unapproved relayers)
+        vm.prank(host);
+        coordination.approveRelayer(address(lobby), true);
+
+        // Fund every player and approve the lobby for entry fees (fees are
+        // pulled from the attestation's participant, so each player approves)
         for (uint256 i = 0; i < PLAYER_COUNT; i++) {
             token.mint(players[i], 100 ether);
             vm.prank(players[i]);
@@ -191,8 +199,12 @@ contract MultiplayerLobbyTest is Test {
         intentSig = _sign(hostKey, _digest(_intentHash(intent)));
     }
 
-    function _joinAs(uint256 index, bytes32 lobbyId) internal {
-        AcceptanceAttestation memory att = AcceptanceAttestation({
+    function _buildAttestation(uint256 index, bytes32 lobbyId)
+        internal
+        view
+        returns (AcceptanceAttestation memory att)
+    {
+        att = AcceptanceAttestation({
             intentHash: lobbyId,
             participant: players[index],
             nonce: 1,
@@ -201,6 +213,10 @@ contract MultiplayerLobbyTest is Test {
             signature: ""
         });
         att.signature = _sign(playerKeys[index], _digest(_acceptanceHash(att)));
+    }
+
+    function _joinAs(uint256 index, bytes32 lobbyId) internal {
+        AcceptanceAttestation memory att = _buildAttestation(index, lobbyId);
 
         vm.prank(players[index]);
         lobby.joinLobby(lobbyId, att);
@@ -348,5 +364,108 @@ contract MultiplayerLobbyTest is Test {
         emit log_named_uint("joinLobby total gas (single accept)", joinLobbyGas);
         // Inner proposeCoordination/acceptCoordination gas comes from
         // `forge test --match-path test/MultiplayerLobbyTest.sol --gas-report`
+    }
+
+    // ============ Regression Tests (permissionless-core hardening) ============
+
+    /// @notice proposeCoordination relayed by an address the proposer never
+    ///         approved must revert — a hostile submitter can no longer
+    ///         front-run a signed intent to gain the submitter role
+    function test_UnapprovedRelayerCannotPropose() public {
+        // Revoke the approval granted in setUp, then relay through the lobby
+        vm.prank(host);
+        coordination.approveRelayer(address(lobby), false);
+
+        (AgentIntent memory intent, bytes memory intentSig, CoordinationPayload memory payload) =
+            _buildLobbyProposal();
+
+        vm.prank(host);
+        vm.expectRevert(AgentCoordination.NotApprovedRelayer.selector);
+        lobby.createLobby(intent, intentSig, payload, GAME_MODE, MAP_ID);
+
+        // An unrelated EOA relaying the signed intent directly is refused too
+        address stranger = makeAddr("stranger");
+        vm.prank(stranger);
+        vm.expectRevert(AgentCoordination.NotApprovedRelayer.selector);
+        coordination.proposeCoordination(intent, intentSig, payload);
+    }
+
+    /// @notice executeCoordination is submitter/proposer-gated: a stranger
+    ///         calling the coordination contract directly can no longer strand
+    ///         the lobby's wrapper state
+    function test_StrangerCannotExecuteDirectly() public {
+        (bytes32 lobbyId, CoordinationPayload memory payload) = _createLobby();
+        for (uint256 i = 0; i < PLAYER_COUNT; i++) {
+            _joinAs(i, lobbyId);
+        }
+
+        address stranger = makeAddr("stranger");
+        vm.prank(stranger);
+        vm.expectRevert(AgentCoordination.NotProposerOrSubmitter.selector);
+        coordination.executeCoordination(lobbyId, payload, abi.encode(GAME_MODE, MAP_ID));
+
+        // The lobby (the submitter) still executes fine
+        lobby.startGame(lobbyId, payload, abi.encode(GAME_MODE, MAP_ID));
+        (Status coordStatus,,,) = lobby.getCoordinationStatus(lobbyId);
+        assertEq(uint8(coordStatus), uint8(Status.Executed));
+    }
+
+    /// @notice A relayed joinLobby charges the attestation's participant, not
+    ///         the relayer submitting the transaction
+    function test_RelayedJoinChargesParticipantNotRelayer() public {
+        (bytes32 lobbyId,) = _createLobby();
+
+        address relayer = makeAddr("relayer");
+        token.mint(relayer, 100 ether);
+        vm.prank(relayer);
+        token.approve(address(lobby), type(uint256).max);
+
+        uint256 participantBefore = token.balanceOf(players[1]);
+        uint256 relayerBefore = token.balanceOf(relayer);
+
+        AcceptanceAttestation memory att = _buildAttestation(1, lobbyId);
+        vm.prank(relayer);
+        lobby.joinLobby(lobbyId, att);
+
+        assertEq(participantBefore - token.balanceOf(players[1]), ENTRY_FEE, "participant pays the fee");
+        assertEq(token.balanceOf(relayer), relayerBefore, "relayer pays nothing");
+        assertTrue(lobby.feePaid(lobbyId, players[1]));
+        assertTrue(lobby.hasPlayerAccepted(lobbyId, players[1]));
+    }
+
+    /// @notice A participant who accepted directly on the coordination
+    ///         contract still pays through joinLobby, and startGame works even
+    ///         though the last acceptance never passed through the lobby
+    function test_DirectAcceptorStillPaysAndGameStarts() public {
+        (bytes32 lobbyId, CoordinationPayload memory payload) = _createLobby();
+
+        // Three players join through the lobby
+        for (uint256 i = 0; i < 3; i++) {
+            _joinAs(i, lobbyId);
+        }
+
+        // The fourth accepts DIRECTLY on the coordination contract,
+        // bypassing the lobby's fee collection; coordination flips to Ready
+        AcceptanceAttestation memory att = _buildAttestation(3, lobbyId);
+        vm.prank(players[3]);
+        coordination.acceptCoordination(lobbyId, att);
+        (Status coordStatus,,,) = lobby.getCoordinationStatus(lobbyId);
+        assertEq(uint8(coordStatus), uint8(Status.Ready));
+
+        // The game cannot start on an unpaid seat
+        vm.expectRevert(MultiplayerGameLobby.LobbyNotReady.selector);
+        lobby.startGame(lobbyId, payload, abi.encode(GAME_MODE, MAP_ID));
+
+        // joinLobby heals the hole: acceptance skipped, fee still collected
+        uint256 before = token.balanceOf(players[3]);
+        vm.prank(players[3]);
+        lobby.joinLobby(lobbyId, att);
+        assertEq(before - token.balanceOf(players[3]), ENTRY_FEE, "direct acceptor still pays");
+        assertEq(uint8(lobby.getLobby(lobbyId).status), uint8(MultiplayerGameLobby.LobbyStatus.Ready));
+
+        // Full pot is escrowed and the game starts
+        assertEq(token.balanceOf(address(lobby)), ENTRY_FEE * PLAYER_COUNT);
+        lobby.startGame(lobbyId, payload, abi.encode(GAME_MODE, MAP_ID));
+        assertEq(uint8(lobby.getLobby(lobbyId).status), uint8(MultiplayerGameLobby.LobbyStatus.Active));
     }
 }

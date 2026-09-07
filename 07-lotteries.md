@@ -13,7 +13,7 @@ Lotteries are among the most popular blockchain gaming applications. They combin
 
 ## SimpleLottery: Commit-Reveal RNG
 
-The commit-reveal pattern provides randomness without external oracle dependency, and honest participants get a fair draw. It is not manipulation-proof, however: the last participant to reveal can compute the final seed before deciding whether to reveal at all, and this contract imposes no penalty for withholding a reveal---production systems need reveal bonds or forfeiture penalties, or should use a VRF instead. Note also that `enter()` allows only one entry per address (buy multiple tickets in a single call): the winning seed XORs together every entry's revealed number, so a participant appearing twice would XOR their own contribution back out of the seed.
+The commit-reveal pattern provides randomness without external oracle dependency, and honest participants get a fair draw. It is not manipulation-proof, however: the last participant to reveal can compute the final seed before deciding whether to reveal at all, and this contract imposes no penalty for withholding a reveal---production systems need reveal bonds or forfeiture penalties, or should use a VRF instead. Note also that `enter()` allows only one entry per address (buy multiple tickets in a single call): the winning seed XORs together every entry's revealed number, so a participant appearing twice would XOR their own contribution back out of the seed. The guard itself is an O(1) `hasEntered` mapping rather than a scan of the entries array, which would make filling a round quadratic in storage reads.
 
 ```solidity
 
@@ -50,6 +50,9 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
     
     uint256 public pot;
     Entry[] public entries;
+    /// @notice O(1) duplicate-entry check; scanning the entries array instead
+    /// would make filling a round O(n^2) in storage reads.
+    mapping(address => bool) public hasEntered;
     mapping(address => Commitment) public commitments;
     mapping(address => uint256) public revealedNumbers;
     
@@ -97,6 +100,7 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         // Buy multiple tickets in a single entry instead.
         require(!_isParticipant(msg.sender), "Already entered");
 
+        hasEntered[msg.sender] = true;
         entries.push(Entry({
             participant: msg.sender,
             amount: msg.value,
@@ -219,10 +223,7 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
     }
     
     function _isParticipant(address user) internal view returns (bool) {
-        for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].participant == user) return true;
-        }
-        return false;
+        return hasEntered[user];
     }
     
     /**

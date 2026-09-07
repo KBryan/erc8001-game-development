@@ -97,8 +97,10 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
         uint256 fairPayout = (msg.value * MAX_ROLL * (BPS_DENOMINATOR - houseEdgeBps)) /
                            ((target - 1) * BPS_DENOMINATOR);
         
+        // address(this).balance already includes msg.value at this point,
+        // so the full payout must be covered without subtracting the bet.
         require(
-            address(this).balance >= fairPayout - msg.value,
+            address(this).balance >= fairPayout,
             "Insufficient contract balance"
         );
         
@@ -238,13 +240,13 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
     function getStats() external view returns (
         uint256 wagered,
         uint256 paid,
-        uint256 bets,
+        uint256 totalBets,
         uint256 balance,
         int256 profit
     ) {
         wagered = totalWagered;
         paid = totalPaid;
-        bets = betCount;
+        totalBets = betCount;
         balance = address(this).balance;
         profit = int256(wagered) - int256(paid);
     }
@@ -427,7 +429,7 @@ contract Roulette is ReentrancyGuard, Ownable {
     /**
      * @notice Get house edge for bet type
      */
-    function getHouseEdge(BetType betType) external pure returns (uint256 bps) {
+    function getHouseEdge(BetType /* betType */) external pure returns (uint256 bps) {
         // European roulette: 2.7% house edge on all bets
         // (1/37 = 0.027)
         return 270;

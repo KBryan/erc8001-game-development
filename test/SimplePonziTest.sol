@@ -15,7 +15,7 @@ contract SimplePonziTest is Test {
         vm.deal(bob, 1 ether);
     }
 
-    function test_InitialState() public {
+    function test_InitialState() public view {
         assertEq(ponzi.currentWinner(), address(0));
         assertEq(ponzi.highestBid(), 0);
     }

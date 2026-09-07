@@ -138,16 +138,24 @@ bytes32 public constant ACCEPTANCE_TYPEHASH = keccak256(
 
 ### Domain Separator
 
-Each contract has a unique domain separator for cross-contract replay protection:
+Each contract has a unique domain separator for cross-contract replay protection. It is built from the chain id and contract address, and served fork-safely — cached at deployment, rebuilt if the chain id ever changes so signatures cannot replay across a chain fork:
 
 ```solidity
-DOMAIN_SEPARATOR = keccak256(abi.encode(
-    DOMAIN_TYPEHASH,
-    keccak256(bytes("ERC-8001-Core")),
-    keccak256(bytes("1")),
-    block.chainid,
-    address(this)
-));
+function DOMAIN_SEPARATOR() public view returns (bytes32) {
+    return block.chainid == _cachedChainId ? _cachedDomainSeparator : _buildDomainSeparator();
+}
+
+function _buildDomainSeparator() private view returns (bytes32) {
+    return keccak256(
+        abi.encode(
+            DOMAIN_TYPEHASH,
+            keccak256(bytes(DOMAIN_NAME)),     // "ERC-8001-Core"
+            keccak256(bytes(DOMAIN_VERSION)),  // "1"
+            block.chainid,
+            address(this)
+        )
+    );
+}
 ```
 
 ### Wallet Display Example
@@ -196,11 +204,14 @@ function proposeCoordination(
 3. Signs intent with EIP-712
 4. Submits to contract
 5. Contract validates:
+   - Caller is the agent, or a relayer the agent pre-approved via `approveRelayer`
    - Intent not expired
    - Participants sorted and unique
    - Agent is in participant list
    - Payload hash matches
    - Nonce is strictly increasing
+
+The relayer gate matters: without it, anyone could copy a signed intent from the mempool and submit it first, becoming the recorded submitter — with the cancellation rights that role carries. Approving a game contract once (`coordination.approveRelayer(gameContract, true)`) is what authorizes it to propose, execute, and cancel on your behalf.
 
 **Gas cost**: roughly 290,000 gas for a 4-player coordination (measured with `forge test --gas-report` against this book's reference implementation). The dominant cost is storing the participant list — about 20,000 gas per address — so cost grows roughly linearly with roster size.
 
@@ -243,8 +254,10 @@ if (st.acceptedCount == st.participants.length) {
 
 ### Phase 3: Execution (Ready → Executed)
 
-**Who**: Any address (can be different from participants)  
+**Who**: The proposer, or the contract that submitted the proposal  
 **What**: Trigger actual execution
+
+Execution is deliberately *not* permissionless: a stranger who executed a Ready coordination directly would flip its status to `Executed` behind the wrapper contract's back, stranding any escrowed fees the wrapper was managing. Restricting execution to the proposer and submitter keeps wrapper state and coordination state in lockstep.
 
 ```solidity
 function executeCoordination(
@@ -308,11 +321,12 @@ contract GameCoordination is AgentCoordination {
 
 ### MultiplayerGameLobby
 
-A lobby wraps one ERC-8001 coordination: the **lobby ID is the intent hash**, the roster is fixed when the host proposes, and the lobby becomes `Ready` exactly when every rostered player has accepted.
+A lobby wraps one ERC-8001 coordination: the **lobby ID is the intent hash**, the roster is fixed when the host proposes, and the game can start exactly when every rostered player has accepted *and paid*. One prerequisite: the host approves the lobby as their relayer once — `coordination.approveRelayer(address(lobby), true)` — before creating their first lobby.
 
 ```solidity
 // Create a lobby: the host submits their signed AgentIntent naming the
-// exact roster -- this proposes the ERC-8001 coordination
+// exact roster -- this proposes the ERC-8001 coordination (the lobby
+// must be an approved relayer for the host)
 function createLobby(
     AgentIntent calldata intent,
     bytes calldata signature,
@@ -323,8 +337,9 @@ function createLobby(
 
 // Join: every rostered player -- the host included -- submits a signed
 // AcceptanceAttestation; the entry fee is pulled in the game's ERC-20
-// token via transferFrom (approve first). Not payable: fees are tokens,
-// not ETH.
+// token from the ATTESTATION'S participant (who approves the token to
+// the lobby first), so a relayed join still charges the player, never
+// the relayer. Not payable: fees are tokens, not ETH.
 function joinLobby(
     bytes32 lobbyId,
     AcceptanceAttestation calldata attestation
@@ -349,7 +364,7 @@ Before the game starts, the host can `cancelLobby` (anyone can, once the intent 
 
 ### TeamStaking
 
-Team-based staking with shared rewards. The leader proposes with a signed intent; members accept by contributing:
+Team-based staking with shared rewards. The leader proposes with a signed intent (after approving the contract as their relayer, as with the lobby); members accept by contributing:
 
 ```solidity
 // Leader proposes: signed intent plus the stake terms
@@ -392,7 +407,7 @@ The lock is real: an active stake cannot be exited early unless the leader has d
 
 ### ERC8001LootBox
 
-Multi-party loot distribution using Pyth Entropy. Opening is **asynchronous** — one transaction requests verifiable randomness, and the items are distributed later in the oracle's callback:
+Multi-party loot distribution using Pyth Entropy (the organizer approves the contract as their relayer first, as with the lobby). Opening is **asynchronous** — one transaction requests verifiable randomness, and the items are distributed later in the oracle's callback:
 
 ```solidity
 // Organizer proposes the box with item hashes and a per-player open fee
@@ -472,25 +487,16 @@ require(attestation.expiry > block.timestamp, "Acceptance expired");
 ### 4. Smart Contract Signature Support
 
 ```solidity
-function _isValidSig(address signer, bytes32 digest, bytes memory signature) 
-    internal view returns (bool) {
-    if (signer.code.length == 0) {
-        // EOA: Use ECDSA recovery
-        (address recovered, ECDSA.RecoverError err) = digest.tryRecover(signature);
-        return err == ECDSA.RecoverError.NoError && recovered == signer;
-    } else {
-        // Smart Contract: Use ERC-1271
-        try IERC1271(signer).isValidSignature(digest, signature) 
-            returns (bytes4 magic) {
-            return magic == IERC1271.isValidSignature.selector;
-        } catch {
-            return false;
-        }
-    }
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+
+// OZ SignatureChecker handles the split: ECDSA recovery for EOAs,
+// ERC-1271 isValidSignature for smart contract wallets
+function _isValidSig(address signer, bytes32 digest, bytes calldata signature) internal view returns (bool) {
+    return SignatureChecker.isValidSignatureNowCalldata(signer, digest, signature);
 }
 ```
 
-**Benefit**: Works with smart contract wallets (Safe, Argent, etc.) not just EOAs.
+**Benefit**: Works with smart contract wallets (Safe, Argent, etc.) not just EOAs — and leaning on OpenZeppelin's audited `SignatureChecker` avoids hand-rolling the EOA/ERC-1271 branching (an earlier draft of this contract did, and got the failure path subtly wrong).
 
 ### 5. Reentrancy Protection
 
@@ -638,7 +644,8 @@ await contract.acceptCoordination(intentHash, {
 ### Step 5: Execute
 
 ```javascript
-// Once all accept, anyone can execute
+// Once all accept, the proposer (or the contract that submitted the
+// proposal) executes -- execution is not open to third parties
 await contract.executeCoordination(intentHash, payload, executionData);
 ```
 

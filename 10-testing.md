@@ -164,6 +164,8 @@ contract GameFiIntegrationTest is Test {
 
 *Integration testing*
 
+The full companion file adds `test_EmergencyUnstakeWhenRewardPoolUnfunded`, exercising Chapter 6's escape hatch: on an unfunded reward pool, `unstake` reverts while `emergencyUnstake` returns exactly the principal.
+
 ## Fuzz Testing
 
 Fuzz tests generate random inputs to discover edge cases:
@@ -224,9 +226,7 @@ contract SatoshiDiceFuzzTest is Test {
     function testFuzz_ContractBalanceInvariant(uint256 seed) public {
         vm.deal(address(this), 10 ether);
         dice.deposit{value: 10 ether}();
-        
-        uint256 initialBalance = address(dice).balance;
-        
+
         // Simulate many bets
         for (uint256 i = 0; i < 100; i++) {
             uint8 target = uint8(bound(uint256(keccak256(abi.encode(seed, i))), 2, 99));
@@ -253,6 +253,8 @@ contract SatoshiDiceFuzzTest is Test {
 *Fuzz testing examples*
 
 <a id="lst:fuzz-testing"></a>
+
+The companion test file also carries a regression fuzz test, `testFuzz_RejectBetWhenBankrollCannotCoverPayout`, pinning Chapter 8's bankroll check: an empty-bankroll `SatoshiDice` must reject every valid bet upfront rather than accept a wager it could never pay out.
 
 ## Invariant Testing
 
@@ -285,7 +287,7 @@ contract LotteryInvariantTest is Test {
     /**
      * @notice Invariant: Total invested should equal pot when no payouts
      */
-    function invariant_PotAccounting() public {
+    function invariant_PotAccounting() public view {
         assertEq(address(lottery).balance, lottery.pot());
     }
     
@@ -299,7 +301,7 @@ contract LotteryInvariantTest is Test {
     /**
      * @notice Invariant: Winner should only be set after draw
      */
-    function invariant_WinnerState() public {
+    function invariant_WinnerState() public view {
         if (lottery.winner() != address(0)) {
             assertTrue(lottery.phase() == SimpleLottery.Phase.Closed);
         }

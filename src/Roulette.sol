@@ -154,7 +154,7 @@ contract Roulette is ReentrancyGuard, Ownable {
     /**
      * @notice Get house edge for bet type
      */
-    function getHouseEdge(BetType betType) external pure returns (uint256 bps) {
+    function getHouseEdge(BetType /* betType */) external pure returns (uint256 bps) {
         // European roulette: 2.7% house edge on all bets
         // (1/37 = 0.027)
         return 270;

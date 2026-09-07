@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -29,6 +30,8 @@ interface IMorpho {
  * @notice Manages game treasury yield through Morpho integration
  */
 contract YieldManager is Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     IMorpho public morpho;
     IERC20 public underlying;
     address public poolToken;
@@ -60,8 +63,10 @@ contract YieldManager is Ownable, ReentrancyGuard {
     function deposit(uint256 amount) external onlyOwner {
         require(amount > 0, "Zero amount");
         
-        underlying.transferFrom(msg.sender, address(this), amount);
-        underlying.approve(address(morpho), amount);
+        // SafeERC20 reverts on tokens that signal failure by returning false
+        // (a raw transferFrom would silently ignore that return value)
+        underlying.safeTransferFrom(msg.sender, address(this), amount);
+        underlying.forceApprove(address(morpho), amount);
         
         uint256 supplied = morpho.supply(poolToken, address(this), amount, 0);
         totalDeposited += supplied;
@@ -76,7 +81,7 @@ contract YieldManager is Ownable, ReentrancyGuard {
         uint256 withdrawn = morpho.withdraw(poolToken, amount);
         totalDeposited = totalDeposited > withdrawn ? totalDeposited - withdrawn : 0;
         
-        underlying.transfer(owner(), withdrawn);
+        underlying.safeTransfer(owner(), withdrawn);
         emit Withdrawn(withdrawn);
     }
     

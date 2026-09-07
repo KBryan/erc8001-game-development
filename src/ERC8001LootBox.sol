@@ -4,6 +4,8 @@ pragma solidity ^0.8.26;
 import {AgentCoordination} from "./AgentCoordination.sol";
 import {AgentIntent, AcceptanceAttestation, CoordinationPayload, Status} from "./IAgentCoordination.sol";
 import {GameCoordination} from "./GameCoordination.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title IPythEntropy
@@ -42,18 +44,27 @@ interface IERC721Loot {
  *      the random outcome is determined by verifiable Pyth Entropy
  * 
  * ERC-8001 FLOW:
+ * 0. Organizer approves this contract as their relayer on the coordination
+ *    contract (coordination.approveRelayer(lootBox, true)) — once, ever
  * 1. Organizer creates loot box intent with participants
  * 2. Call createLootBox() → proposeCoordination() (Status: Proposed)
- * 3. All participants call agreeToOpen() → acceptCoordination()
- * 4. Anyone can openLootBox() → executeCoordination() + Pyth request
+ * 3. All participants agree via agreeToOpen() → acceptCoordination(); the
+ *    open fee is pulled from the attestation's participant (who approves the
+ *    fee token to this contract), so a relayed agreement charges the right
+ *    account. A participant who already accepted directly on the coordination
+ *    contract still pays through agreeToOpen() — the acceptance is skipped,
+ *    the fee is not
+ * 4. A participant can openLootBox() once everyone agreed AND paid →
+ *    executeCoordination() + Pyth request
  * 5. Pyth callback reveals items based on verifiable randomness
- * 
+ *
  * PYTH ENTROPY FLOW:
  * - requestWithCallback() requests randomness (requires ETH fee)
  * - Pyth oracle calls entropyCallback() with random value
  * - Randomness determines loot outcome verifiably
  */
 contract ERC8001LootBox {
+    using SafeERC20 for IERC20;
 
     // ============ Constants ============
 
@@ -166,6 +177,15 @@ contract ERC8001LootBox {
     /// @notice Boxes by participant
     mapping(address => bytes32[]) public participantBoxes;
 
+    /// @notice Whether a participant has paid the open fee for a box
+    /// @dev The escrow ledger: refunds and the organizer payout are computed
+    ///      strictly from this mapping, never from acceptance counts on the
+    ///      coordination contract, so one box can never drain another's fees
+    mapping(bytes32 => mapping(address => bool)) public feePaid;
+
+    /// @notice Number of participants who paid the open fee, per box
+    mapping(bytes32 => uint256) public paidCount;
+
     // ============ Events ============
 
     /// @notice Emitted when loot box is created
@@ -254,11 +274,6 @@ contract ERC8001LootBox {
 
     // ============ Modifiers ============
 
-    modifier onlyOrganizer(bytes32 boxId) {
-        if (lootBoxes[boxId].organizer != msg.sender) revert NotOrganizer();
-        _;
-    }
-
     modifier onlyParticipant(bytes32 boxId) {
         bool isParticipant = false;
         address[] memory parts = lootBoxes[boxId].participants;
@@ -320,6 +335,9 @@ contract ERC8001LootBox {
      * @return boxId The created loot box ID
      * 
      * ERC-8001 FLOW:
+     * - PREREQUISITE: the organizer must have approved this contract as a
+     *   relayer on the coordination contract
+     *   (coordination.approveRelayer(address(this), true))
      * - proposeCoordination() → Status: Proposed
      * - Participants must accept before opening
      */
@@ -381,11 +399,16 @@ contract ERC8001LootBox {
     // ============ Agree to Open ============
 
     /**
-     * @notice Participant agrees to open the loot box
-     * @dev Accepts coordination through ERC-8001
+     * @notice Participant agrees to open the loot box and pays the open fee
+     * @dev The participant is taken from the attestation, NOT msg.sender, so
+     *      a relayed agreement still charges the right account: the open fee
+     *      is pulled from the participant, who must have approved the fee
+     *      token to this contract. If the participant already accepted
+     *      directly on the coordination contract, the acceptance step is
+     *      skipped but the fee is still collected and recorded
      * @param boxId Loot box ID
      * @param attestation Signed acceptance attestation
-     * 
+     *
      * ERC-8001 FLOW:
      * - acceptCoordination() → adds acceptance
      * - When all accept: Status → Ready
@@ -393,25 +416,43 @@ contract ERC8001LootBox {
     function agreeToOpen(
         bytes32 boxId,
         AcceptanceAttestation calldata attestation
-    ) external onlyParticipant(boxId) {
+    ) external {
         LootBox storage box = lootBoxes[boxId];
+        address participant = attestation.participant;
 
+        if (box.intentHash == bytes32(0)) revert LootBoxNotFound();
         if (box.opened) revert LootBoxAlreadyOpened();
         if (box.cancelled) revert LootBoxAlreadyCancelled();
-        if (coordination.hasAccepted(boxId, msg.sender)) revert AlreadyAgreed();
 
-        // Collect open fee if required
-        if (box.openFee > 0) {
-            _safeTransferFrom(feeToken, msg.sender, address(this), box.openFee);
+        // Validate the participant is on the box's roster
+        bool isParticipant = false;
+        for (uint256 i = 0; i < box.participants.length; i++) {
+            if (box.participants[i] == participant) {
+                isParticipant = true;
+                break;
+            }
         }
+        if (!isParticipant) revert NotParticipant();
 
-        // Accept coordination through ERC-8001
-        coordination.acceptCoordination(boxId, attestation);
+        if (feePaid[boxId][participant]) revert AlreadyAgreed();
+
+        // Collect open fee from the participant — they approve this contract
+        if (box.openFee > 0) {
+            IERC20(feeToken).safeTransferFrom(participant, address(this), box.openFee);
+        }
+        feePaid[boxId][participant] = true;
+        paidCount[boxId] += 1;
+
+        // Accept coordination through ERC-8001, unless the participant
+        // already accepted directly on the coordination contract
+        if (!coordination.hasAccepted(boxId, participant)) {
+            coordination.acceptCoordination(boxId, attestation);
+        }
 
         // Get updated status
         (,,,,, uint256 acceptedCount, uint256 requiredCount,) = coordination.getCoordinationDetails(boxId);
 
-        emit ParticipantAgreed(boxId, msg.sender, acceptedCount, requiredCount);
+        emit ParticipantAgreed(boxId, participant, acceptedCount, requiredCount);
     }
 
     // ============ Open Loot Box ============
@@ -446,6 +487,13 @@ contract ERC8001LootBox {
         // Check all participants agreed
         (,,,,, uint256 acceptedCount, uint256 requiredCount,) = coordination.getCoordinationDetails(boxId);
         if (acceptedCount < requiredCount) revert NotAllAgreed();
+
+        // Every rostered participant must also have paid the open fee — an
+        // acceptance made directly on the coordination contract is agreement,
+        // not payment (agreeToOpen() collects the fee in that case too)
+        for (uint256 i = 0; i < box.participants.length; i++) {
+            if (!feePaid[boxId][box.participants[i]]) revert NotAllAgreed();
+        }
 
         // Get Pyth entropy fee
         uint128 entropyFee = entropy.getRequestFee();
@@ -489,13 +537,13 @@ contract ERC8001LootBox {
         box.randomness = randomness;
 
         // Pay the collected open fees to the organizer who supplied the loot.
-        // Every participant paid openFee in agreeToOpen() and opening requires
-        // unanimous acceptance, so the pool is openFee x participant count.
-        // Uses _tryTransfer: an oracle callback must never revert on a
-        // misbehaving fee token
+        // The pool is openFee x the number of participants recorded as PAID —
+        // never an assumption from the roster size — so the payout can't
+        // exceed what this box actually escrowed. Uses trySafeTransfer: an
+        // oracle callback must never revert on a misbehaving fee token
         if (box.openFee > 0) {
-            uint256 fees = box.openFee * box.participants.length;
-            if (_tryTransfer(feeToken, box.organizer, fees)) {
+            uint256 fees = box.openFee * paidCount[boxId];
+            if (IERC20(feeToken).trySafeTransfer(box.organizer, fees)) {
                 emit OpenFeesPaid(boxId, box.organizer, fees);
             }
         }
@@ -635,12 +683,15 @@ contract ERC8001LootBox {
         // Cancel coordination through ERC-8001
         coordination.cancelCoordination(boxId, reason);
 
-        // Refund open fees to participants who paid
-        // A failed refund is skipped rather than blocking cancellation
+        // Refund open fees ONLY to participants this box recorded as paid —
+        // acceptances on the coordination contract are not proof of payment
+        // here, and refunding by acceptance would let one box drain another's
+        // escrow. A failed refund is skipped rather than blocking cancellation
         for (uint256 i = 0; i < box.participants.length; i++) {
             address participant = box.participants[i];
-            if (coordination.hasAccepted(boxId, participant) && box.openFee > 0) {
-                if (_tryTransfer(feeToken, participant, box.openFee)) {
+            if (feePaid[boxId][participant] && box.openFee > 0) {
+                if (IERC20(feeToken).trySafeTransfer(participant, box.openFee)) {
+                    feePaid[boxId][participant] = false;
                     emit OpenFeeRefunded(boxId, participant, box.openFee);
                 }
             }
@@ -728,38 +779,6 @@ contract ERC8001LootBox {
      */
     function getParticipantBoxes(address participant) external view returns (bytes32[] memory) {
         return participantBoxes[participant];
-    }
-
-    // ============ Token Transfer Helpers ============
-
-    /**
-     * @notice Transfer tokens from an approved account, reverting on failure
-     * @dev Checks return data because some ERC-20s return false instead of
-     *      reverting, and others (like USDT) return nothing at all
-     */
-    function _safeTransferFrom(address token, address from, address to, uint256 amount) private {
-        (bool success, bytes memory returndata) = token.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transferFrom(address,address,uint256)")),
-                from,
-                to,
-                amount
-            )
-        );
-        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
-            revert TransferFailed();
-        }
-    }
-
-    /**
-     * @notice Attempt a token transfer, returning success instead of reverting
-     * @dev Used in refund loops where one failed transfer must not block the rest
-     */
-    function _tryTransfer(address token, address to, uint256 amount) private returns (bool ok) {
-        (bool success, bytes memory returndata) = token.call(
-            abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount)
-        );
-        return success && (returndata.length == 0 || abi.decode(returndata, (bool)));
     }
 
     // ============ Utility Functions ============

@@ -4,6 +4,8 @@ pragma solidity ^0.8.26;
 import {AgentCoordination} from "./AgentCoordination.sol";
 import {AgentIntent, AcceptanceAttestation, CoordinationPayload, Status} from "./IAgentCoordination.sol";
 import {GameCoordination} from "./GameCoordination.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title TeamStaking
@@ -17,13 +19,18 @@ import {GameCoordination} from "./GameCoordination.sol";
  * - Cooperative gameplay with shared economic incentives
  * 
  * ERC-8001 FLOW:
+ * 0. Leader approves this contract as their relayer on the coordination
+ *    contract (coordination.approveRelayer(teamStaking, true)) — once, ever
  * 1. Team leader creates intent with all members as participants
  * 2. Leader calls createTeamStake() → proposeCoordination()
  * 3. Each member contributes stake via contributeStake() + acceptCoordination()
  * 4. When all accept: activateTeamStake() → executeCoordination()
+ *    (this contract escrows the stakes itself, so GameCoordination records no
+ *    internal stake — execution just certifies the unanimous agreement)
  * 5. Rewards distributed proportionally based on contribution
  */
 contract TeamStaking {
+    using SafeERC20 for IERC20;
 
     // ============ State Structures ============
 
@@ -240,6 +247,9 @@ contract TeamStaking {
      * @return stakeId The created team stake ID
      * 
      * ERC-8001 FLOW:
+     * - PREREQUISITE: the leader must have approved this contract as a
+     *   relayer on the coordination contract
+     *   (coordination.approveRelayer(address(this), true))
      * - proposeCoordination() → Status: Proposed
      * - Members must accept before stake activates
      */
@@ -337,7 +347,7 @@ contract TeamStaking {
         if (memberStakes[stakeId][msg.sender].amount > 0) revert AlreadyContributed();
 
         // Transfer stake tokens
-        _safeTransferFrom(stakeToken, msg.sender, address(this), amount);
+        IERC20(stakeToken).safeTransferFrom(msg.sender, address(this), amount);
 
         // Record member stake
         memberStakes[stakeId][msg.sender] = MemberStake({
@@ -419,7 +429,7 @@ contract TeamStaking {
         if (distributionType > 1) revert InvalidTeamSize(); // 0 or 1 only
 
         // Transfer rewards to contract
-        _safeTransferFrom(stake.rewardToken, msg.sender, address(this), totalRewards);
+        IERC20(stake.rewardToken).safeTransferFrom(msg.sender, address(this), totalRewards);
 
         // Calculate per-share reward
         uint256 perShare = distributionType == 0
@@ -462,7 +472,7 @@ contract TeamStaking {
         member.claimedRewards += pendingRewards;
 
         // Transfer rewards
-        _safeTransfer(stake.rewardToken, msg.sender, pendingRewards);
+        IERC20(stake.rewardToken).safeTransfer(msg.sender, pendingRewards);
 
         emit RewardsClaimed(stakeId, msg.sender, pendingRewards);
     }
@@ -492,7 +502,7 @@ contract TeamStaking {
         member.amount = 0;
 
         // Transfer stake + rewards
-        _safeTransfer(stakeToken, msg.sender, totalReturn);
+        IERC20(stakeToken).safeTransfer(msg.sender, totalReturn);
 
         emit StakeWithdrawn(stakeId, msg.sender, stakedAmount, pendingRewards);
     }
@@ -545,7 +555,7 @@ contract TeamStaking {
         member.hasWithdrawn = true;
         member.amount = 0;
 
-        _safeTransfer(stakeToken, msg.sender, stakedAmount + pendingRewards);
+        IERC20(stakeToken).safeTransfer(msg.sender, stakedAmount + pendingRewards);
 
         emit StakeWithdrawn(stakeId, msg.sender, stakedAmount, pendingRewards);
     }
@@ -649,40 +659,6 @@ contract TeamStaking {
 
         uint256 blocksRemaining = stake.expiresAt - block.number;
         return (false, string(abi.encodePacked("Locked for ", uintToString(blocksRemaining), " blocks")));
-    }
-
-    // ============ Token Transfer Helpers ============
-
-    /**
-     * @notice Transfer tokens, reverting on failure
-     * @dev Checks return data because some ERC-20s return false instead of
-     *      reverting, and others (like USDT) return nothing at all
-     */
-    function _safeTransfer(address token, address to, uint256 amount) private {
-        (bool success, bytes memory returndata) = token.call(
-            abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount)
-        );
-        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
-            revert TransferFailed();
-        }
-    }
-
-    /**
-     * @notice Transfer tokens from an approved account, reverting on failure
-     * @dev Same return-data check as _safeTransfer
-     */
-    function _safeTransferFrom(address token, address from, address to, uint256 amount) private {
-        (bool success, bytes memory returndata) = token.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transferFrom(address,address,uint256)")),
-                from,
-                to,
-                amount
-            )
-        );
-        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
-            revert TransferFailed();
-        }
     }
 
     // ============ Utility Functions ============

@@ -2,7 +2,6 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Script.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
 contract PostDeployment is Script {
@@ -13,9 +12,10 @@ contract PostDeployment is Script {
         
         vm.startBroadcast(deployerKey);
         
-        // Transfer ownership
-        Ownable(token).transferOwnership(newOwner);
-        
+        // GameToken is AccessControl-based, not Ownable: there is no owner
+        // to transfer -- the roles ARE the ownership, so the handoff below
+        // (grant to newOwner, renounce as deployer) is the whole job.
+
         // Grant admin role.
         // CAUTION: DEFAULT_ADMIN_ROLE is bytes32(0), NOT keccak256 of its
         // name -- hashing the name grants a meaningless role while the

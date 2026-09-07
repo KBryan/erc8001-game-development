@@ -291,7 +291,7 @@ forge script script/Deploy.s.sol \
 
 ## Post-Deployment Tasks
 
-### Ownership Transfer
+### Admin Handover
 
 ```solidity
 
@@ -299,7 +299,6 @@ forge script script/Deploy.s.sol \
 pragma solidity ^0.8.26;
 
 import "forge-std/Script.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
 contract PostDeployment is Script {
@@ -310,9 +309,10 @@ contract PostDeployment is Script {
         
         vm.startBroadcast(deployerKey);
         
-        // Transfer ownership
-        Ownable(token).transferOwnership(newOwner);
-        
+        // GameToken is AccessControl-based, not Ownable: there is no owner
+        // to transfer -- the roles ARE the ownership, so the handoff below
+        // (grant to newOwner, renounce as deployer) is the whole job.
+
         // Grant admin role.
         // CAUTION: DEFAULT_ADMIN_ROLE is bytes32(0), NOT keccak256 of its
         // name -- hashing the name grants a meaningless role while the
@@ -328,9 +328,9 @@ contract PostDeployment is Script {
 }
 ```
 
-*Post-deployment ownership transfer*
+*Post-deployment admin handover*
 
-Note the way the admin role is read from the contract rather than hashed by name. OpenZeppelin's `DEFAULT_ADMIN_ROLE` is `bytes32(0)`, not `keccak256("DEFAULT_ADMIN_ROLE")` -- a script that hashes the name grants and renounces a role nobody checks, leaving the deployer silently in control while the handover appears to succeed.
+Because `GameToken` uses `AccessControl` rather than `Ownable`, there is no `transferOwnership` call to make---the roles are the ownership, and handing over admin means granting `DEFAULT_ADMIN_ROLE` to the new owner and renouncing it as the deployer. Note the way the admin role is read from the contract rather than hashed by name. OpenZeppelin's `DEFAULT_ADMIN_ROLE` is `bytes32(0)`, not `keccak256("DEFAULT_ADMIN_ROLE")` -- a script that hashes the name grants and renounces a role nobody checks, leaving the deployer silently in control while the handover appears to succeed.
 
 ### Emergency Procedures
 
@@ -408,7 +408,7 @@ contract.on("BetPlaced", (_, player) => {
 | 4 | Verify contract source | Etherscan/Basescan verification |
 | 5 | Test verified contract | Interact via block explorer |
 | 6 | Deploy to mainnet | Use hardware wallet for deployer |
-| 7 | Transfer ownership | To multisig or governance |
+| 7 | Hand over admin roles | To multisig or governance |
 | 8 | Set up monitoring | Events, balance, anomalies |
 | 9 | Create emergency plan | Pause mechanisms, contact info |
 | 10 | Document deployment | Contract addresses, ABIs, notes |

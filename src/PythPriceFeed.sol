@@ -90,7 +90,7 @@ contract PythPriceFeed {
     function calculateUsdValue(address token, uint256 /* amount */)
         external
         view
-        returns (uint256 usdValue)
+        returns (uint256)
     {
         revert TokenFeedNotConfigured(token);
     }

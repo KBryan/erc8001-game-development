@@ -53,6 +53,32 @@ contract GameFiIntegrationTest is Test {
         vm.stopPrank();
     }
     
+    function test_EmergencyUnstakeWhenRewardPoolUnfunded() public {
+        // Fresh staking contract whose reward pool is never funded
+        GameStaking unfunded = new GameStaking(address(token), address(token));
+
+        vm.startPrank(alice);
+        token.approve(address(unfunded), 100 ether);
+        uint256 stakeId = unfunded.stake(100 ether, 30 days);
+
+        vm.warp(block.timestamp + 30 days);
+
+        // Strict unstake reverts: the pool cannot cover the earned reward
+        vm.expectRevert("Insufficient reward pool");
+        unfunded.unstake(stakeId);
+
+        // Emergency exit returns principal only, forfeiting the reward
+        uint256 balanceBefore = token.balanceOf(alice);
+        unfunded.emergencyUnstake(stakeId);
+        assertEq(token.balanceOf(alice) - balanceBefore, 100 ether);
+        assertEq(unfunded.totalStaked(), 0);
+
+        // The stake is spent -- no double exit
+        vm.expectRevert("Already claimed");
+        unfunded.emergencyUnstake(stakeId);
+        vm.stopPrank();
+    }
+
     function test_MultipleUsersStaking() public {
         // Alice stakes
         vm.startPrank(alice);

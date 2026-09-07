@@ -23,7 +23,7 @@ contract LotteryInvariantTest is Test {
     /**
      * @notice Invariant: Total invested should equal pot when no payouts
      */
-    function invariant_PotAccounting() public {
+    function invariant_PotAccounting() public view {
         assertEq(address(lottery).balance, lottery.pot());
     }
     
@@ -37,7 +37,7 @@ contract LotteryInvariantTest is Test {
     /**
      * @notice Invariant: Winner should only be set after draw
      */
-    function invariant_WinnerState() public {
+    function invariant_WinnerState() public view {
         if (lottery.winner() != address(0)) {
             assertTrue(lottery.phase() == SimpleLottery.Phase.Closed);
         }

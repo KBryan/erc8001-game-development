@@ -2,14 +2,19 @@
 pragma solidity ^0.8.26;
 
 import {IAgentCoordination, Status, AgentIntent, AcceptanceAttestation, CoordinationPayload} from "./IAgentCoordination.sol";
-import {IERC1271} from "./interfaces/IERC1271.sol";
-import {ECDSA} from "./utils/ECDSA.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 
 /**
  * @title AgentCoordination
+ * @dev RELAYED SUBMISSION MODEL: proposeCoordination may be called by the
+ *      proposer directly, or relayed by an address the proposer has approved
+ *      via approveRelayer() — typically a wrapper contract (lobby, loot box,
+ *      staking pool). A host approves their game contract once, then every
+ *      proposal it submits on their behalf is accepted. Because the recorded
+ *      submitter is always proposer-trusted, the submitter's cancel and
+ *      execute rights below are safe.
  */
 contract AgentCoordination is IAgentCoordination {
-    using ECDSA for bytes32;
 
     // ============ Constants ============
 
@@ -35,7 +40,12 @@ contract AgentCoordination is IAgentCoordination {
 
     // ============ Immutables ============
 
-    bytes32 public immutable DOMAIN_SEPARATOR;
+    /// @dev Domain separator cached at deployment, valid while the chain id
+    ///      matches the one seen at deployment (see DOMAIN_SEPARATOR())
+    bytes32 private immutable _cachedDomainSeparator;
+
+    /// @dev Chain id at deployment, to detect chain forks
+    uint256 private immutable _cachedChainId;
 
     // ============ Storage ============
 
@@ -62,6 +72,12 @@ contract AgentCoordination is IAgentCoordination {
     /// @notice Intent hash to coordination state
     mapping(bytes32 => CoordinationState) internal states;
 
+    /// @notice Relayers approved to submit proposals on an agent's behalf
+    /// @dev approvedRelayers[agent][relayer] — each agent manages their own
+    ///      list. A host approves their game contract once before using it as
+    ///      a relay for createLobby / createLootBox / createTeamStake
+    mapping(address => mapping(address => bool)) public approvedRelayers;
+
     /// @notice Reentrancy lock
     bool private _locked;
 
@@ -69,6 +85,17 @@ contract AgentCoordination is IAgentCoordination {
 
     /// @notice Emitted when coordination reaches READY status
     event CoordinationReady(bytes32 indexed intentHash, uint256 participantCount, uint64 minAcceptanceExpiry);
+
+    /// @notice Emitted when an agent approves or revokes a relayer
+    event RelayerApproved(address indexed agent, address indexed relayer, bool approved);
+
+    // ============ Errors ============
+
+    /// @notice proposeCoordination caller is neither the proposer nor a relayer they approved
+    error NotApprovedRelayer();
+
+    /// @notice executeCoordination caller is neither the proposer nor the recorded submitter
+    error NotProposerOrSubmitter();
 
     // ============ Modifiers ============
 
@@ -82,15 +109,23 @@ contract AgentCoordination is IAgentCoordination {
     // ============ Constructor ============
 
     constructor() {
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                DOMAIN_TYPEHASH,
-                keccak256(bytes(DOMAIN_NAME)),
-                keccak256(bytes(DOMAIN_VERSION)),
-                block.chainid,
-                address(this)
-            )
-        );
+        _cachedChainId = block.chainid;
+        _cachedDomainSeparator = _buildDomainSeparator();
+    }
+
+    // ============ Relayer Management ============
+
+    /**
+     * @notice Approve or revoke a relayer for the caller's own proposals
+     * @dev msg.sender approves for themselves only. A wrapper contract that
+     *      submits intents on the caller's behalf (lobby, loot box, staking
+     *      pool) must be approved here once before its first submission
+     * @param relayer Address allowed to relay proposeCoordination for msg.sender
+     * @param approved True to approve, false to revoke
+     */
+    function approveRelayer(address relayer, bool approved) external {
+        approvedRelayers[msg.sender][relayer] = approved;
+        emit RelayerApproved(msg.sender, relayer, approved);
     }
 
     // ============ Internal Utilities ============
@@ -140,20 +175,11 @@ contract AgentCoordination is IAgentCoordination {
 
     /**
      * @notice Verify signature from EOA or ERC-1271 contract
+     * @dev OZ SignatureChecker handles the split: ECDSA recovery for EOAs,
+     *      an isValidSignature() call for smart contract wallets
      */
-    function _isValidSig(address signer, bytes32 digest, bytes memory signature) internal view returns (bool) {
-        if (signer.code.length == 0) {
-            // EOA verification
-            (address recovered, ECDSA.RecoverError err) = digest.tryRecover(signature);
-            return err == ECDSA.RecoverError.NoError && recovered == signer;
-        } else {
-            // ERC-1271 smart contract wallet
-            try IERC1271(signer).isValidSignature(digest, signature) returns (bytes4 magic) {
-                return magic == IERC1271.isValidSignature.selector;
-            } catch {
-                return false;
-            }
-        }
+    function _isValidSig(address signer, bytes32 digest, bytes calldata signature) internal view returns (bool) {
+        return SignatureChecker.isValidSignatureNowCalldata(signer, digest, signature);
     }
 
     // ============ EIP-712 Introspection ============
@@ -184,12 +210,34 @@ contract AgentCoordination is IAgentCoordination {
         extensions = new uint256[](0);
     }
 
+    /**
+     * @notice EIP-712 domain separator, fork-safe
+     * @dev Uses the value cached at deployment while block.chainid matches
+     *      the deployment chain; after a chain fork it rebuilds with the new
+     *      chain id, so signatures cannot be replayed across the fork
+     */
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        return block.chainid == _cachedChainId ? _cachedDomainSeparator : _buildDomainSeparator();
+    }
+
+    function _buildDomainSeparator() private view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                DOMAIN_TYPEHASH,
+                keccak256(bytes(DOMAIN_NAME)),
+                keccak256(bytes(DOMAIN_VERSION)),
+                block.chainid,
+                address(this)
+            )
+        );
+    }
+
     function getDomainSeparator() external view returns (bytes32) {
-        return DOMAIN_SEPARATOR;
+        return DOMAIN_SEPARATOR();
     }
 
     function getTypedDataDigest(bytes32 structHash) public view returns (bytes32) {
-        return keccak256(abi.encodePacked(hex"1901", DOMAIN_SEPARATOR, structHash));
+        return keccak256(abi.encodePacked(hex"1901", DOMAIN_SEPARATOR(), structHash));
     }
 
     // ============ Hash Builders ============
@@ -231,11 +279,25 @@ contract AgentCoordination is IAgentCoordination {
 
     // ============ Core Functions ============
 
+    /**
+     * @notice Propose a new coordination
+     * @dev Submission is restricted to the proposer or a relayer they approved
+     *      via approveRelayer() — a host approves their game contract once
+     *      before using it as a relay. This keeps the recorded submitter
+     *      proposer-trusted, which is what makes the submitter's cancel and
+     *      execute rights safe, and stops a hostile third party from
+     *      front-running a signed intent to become its submitter
+     */
     function proposeCoordination(
         AgentIntent calldata intent,
         bytes calldata signature,
         CoordinationPayload calldata payload
     ) external nonReentrant returns (bytes32 intentHash) {
+        // Only the proposer, or a relayer the proposer approved, may submit
+        if (msg.sender != intent.agentId && !approvedRelayers[intent.agentId][msg.sender]) {
+            revert NotApprovedRelayer();
+        }
+
         // Validate timing
         require(intent.expiry > block.timestamp, "Intent expired");
 
@@ -340,6 +402,12 @@ contract AgentCoordination is IAgentCoordination {
         return false;
     }
 
+    /**
+     * @notice Execute a ready coordination
+     * @dev Execution goes through the proposer or the contract that submitted
+     *      the proposal, so wrapper state (lobby, loot box, ...) can't be
+     *      desynced by a third party racing executeCoordination directly
+     */
     function executeCoordination(bytes32 intentHash, CoordinationPayload calldata payload, bytes calldata executionData)
     external
     nonReentrant
@@ -349,6 +417,9 @@ contract AgentCoordination is IAgentCoordination {
 
         // Validate state
         require(st.proposer != address(0), "Unknown intent");
+
+        // Only the proposer or the recorded submitter may execute
+        if (msg.sender != st.proposer && msg.sender != st.submitter) revert NotProposerOrSubmitter();
         require(st.status == Status.Ready, "Not ready");
         require(block.timestamp <= st.expiry, "Intent expired");
 

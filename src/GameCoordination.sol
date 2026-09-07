@@ -3,6 +3,8 @@ pragma solidity ^0.8.26;
 
 import {AgentCoordination} from "./AgentCoordination.sol";
 import {Status, AgentIntent, AcceptanceAttestation, CoordinationPayload} from "./IAgentCoordination.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title GameCoordination
@@ -16,6 +18,7 @@ import {Status, AgentIntent, AcceptanceAttestation, CoordinationPayload} from ".
  * - Status: Proposed → Ready → Executed → Cancelled/Expired
  */
 contract GameCoordination is AgentCoordination {
+    using SafeERC20 for IERC20;
 
     // ============ Game-Specific Coordination Types ============
 
@@ -34,6 +37,9 @@ contract GameCoordination is AgentCoordination {
     /// @notice Game lobby coordination type
     bytes32 public constant COORDINATION_LOBBY = keccak256("LOBBY");
 
+    /// @notice Loot box coordination type (wrapper-managed, see ERC8001LootBox)
+    bytes32 public constant COORDINATION_LOOT_BOX = keccak256("LOOT_BOX");
+
     // ============ State Variables ============
 
     /// @notice ERC-20 token used for game economics (entry fees, rewards)
@@ -46,7 +52,7 @@ contract GameCoordination is AgentCoordination {
     /// @dev Aligned with the base coordination layer's MAX_PARTICIPANTS (32);
     ///      a larger value would be unreachable because proposeCoordination
     ///      caps every intent's participant list at that limit
-    uint256 public constant MAX_TOURNAMENT_PLAYERS = 32;
+    uint256 public constant MAX_TOURNAMENT_PLAYERS = MAX_PARTICIPANTS;
 
     // ============ Tournament State ============
 
@@ -98,6 +104,10 @@ contract GameCoordination is AgentCoordination {
 
     /// @notice Reward tokens deposited for each team, awaiting distribution
     mapping(bytes32 => uint256) public teamRewardPools;
+
+    /// @notice Reward shares whose transfer failed during distribution,
+    ///         claimable later via claimUnclaimedReward()
+    mapping(bytes32 => mapping(address => uint256)) public unclaimedRewards;
 
     // ============ Battle State ============
 
@@ -198,6 +208,31 @@ contract GameCoordination is AgentCoordination {
         uint8 distributionType
     );
 
+    /// @notice Emitted when a reward share could not be delivered and was
+    ///         credited to unclaimedRewards instead
+    event RewardShareUnclaimed(
+        bytes32 indexed intentHash,
+        address indexed member,
+        uint256 amount
+    );
+
+    /// @notice Emitted when a member pulls a previously unclaimed reward share
+    event UnclaimedRewardClaimed(
+        bytes32 indexed intentHash,
+        address indexed member,
+        uint256 amount
+    );
+
+    /// @notice Emitted when the proposer closes an executed team stake
+    event TeamStakeClosed(bytes32 indexed intentHash);
+
+    /// @notice Emitted when a member withdraws their team contribution
+    event TeamContributionWithdrawn(
+        bytes32 indexed intentHash,
+        address indexed member,
+        uint256 amount
+    );
+
     // ============ Errors ============
 
     error InvalidCoordinationType();
@@ -206,11 +241,14 @@ contract GameCoordination is AgentCoordination {
     error InvalidEntryFee();
     error PlayerAlreadyEntered();
     error TournamentFull();
-    error TransferFailed();
     error BattleNotFound();
     error BattleAlreadyResolved();
     error LootAlreadyDistributed();
     error NotAuthorized();
+    error StakeNotFound();
+    error StakeNotActive();
+    error ContributionLocked();
+    error NothingToClaim();
 
     // ============ Constructor ============
 
@@ -252,6 +290,12 @@ contract GameCoordination is AgentCoordination {
             return _executeLootShare(intentHash, payload, executionData, state);
         } else if (payload.coordinationType == COORDINATION_LOBBY) {
             return _executeLobby(intentHash, payload, executionData, state);
+        } else if (payload.coordinationType == COORDINATION_LOOT_BOX) {
+            // Wrapper-managed pattern: ERC8001LootBox escrows the fees and
+            // distributes items itself (via Pyth Entropy) after execution.
+            // The coordination layer only certifies unanimous agreement, so
+            // the executionData (the user randomness) is passed through
+            return (true, executionData);
         }
 
         // Unknown coordination type - revert
@@ -264,13 +308,12 @@ contract GameCoordination is AgentCoordination {
      * @notice Execute tournament coordination
      * @dev Collects entry fees from all participants
      * @param intentHash The coordination intent hash
-     * @param payload Coordination payload
      * @param executionData Encoded (uint256 entryFee, uint256 maxPlayers)
      * @param state Coordination state with participants
      */
     function _executeTournament(
         bytes32 intentHash,
-        CoordinationPayload calldata payload,
+        CoordinationPayload calldata, /* payload */
         bytes calldata executionData,
         CoordinationState storage state
     ) internal returns (bool, bytes memory) {
@@ -301,7 +344,7 @@ contract GameCoordination is AgentCoordination {
 
             // Transfer tokens from participant to this contract
             // Note: Participants must approve this contract beforehand
-            _safeTransferFrom(gameToken, participant, address(this), entryFee);
+            IERC20(gameToken).safeTransferFrom(participant, address(this), entryFee);
 
             hasEnteredTournament[intentHash][participant] = true;
         }
@@ -353,7 +396,7 @@ contract GameCoordination is AgentCoordination {
         tournament.completed = true;
 
         // Transfer prize pool to winner
-        _safeTransfer(gameToken, winnerAddress, tournament.prizePool);
+        IERC20(gameToken).safeTransfer(winnerAddress, tournament.prizePool);
 
         emit TournamentCompleted(intentHash, winnerAddress, tournament.prizePool);
     }
@@ -364,13 +407,12 @@ contract GameCoordination is AgentCoordination {
      * @notice Execute team stake coordination
      * @dev Activates staking for a team when all members accept
      * @param intentHash The coordination intent hash
-     * @param payload Coordination payload
      * @param executionData Encoded (address rewardToken, bool equalSplit)
      * @param state Coordination state with participants
      */
     function _executeTeamStake(
         bytes32 intentHash,
-        CoordinationPayload calldata payload,
+        CoordinationPayload calldata, /* payload */
         bytes calldata executionData,
         CoordinationState storage state
     ) internal returns (bool, bytes memory) {
@@ -384,7 +426,14 @@ contract GameCoordination is AgentCoordination {
             totalStaked += teamContributions[intentHash][state.participants[i]];
         }
 
-        if (totalStaked == 0) revert InvalidEntryFee();
+        // Externally-escrowed team stake: when no member contributed through
+        // contributeToTeamStake(), the tokens live in a wrapper contract
+        // (see TeamStaking, which escrows member stakes itself). Certify the
+        // agreement without creating an internal stake record — execution is
+        // submitter-gated, so only the wrapper that proposed can reach here
+        if (totalStaked == 0) {
+            return (true, abi.encode(uint256(0), uint256(0)));
+        }
 
         // Calculate reward share per member (for equal distribution)
         uint256 rewardShare = equalSplit ? totalStaked / state.participants.length : 0;
@@ -416,9 +465,54 @@ contract GameCoordination is AgentCoordination {
      */
     function contributeToTeamStake(bytes32 intentHash, uint256 amount) external nonReentrant {
         // Transfer tokens from contributor
-        _safeTransferFrom(gameToken, msg.sender, address(this), amount);
+        IERC20(gameToken).safeTransferFrom(msg.sender, address(this), amount);
 
         teamContributions[intentHash][msg.sender] += amount;
+    }
+
+    /**
+     * @notice Withdraw the caller's team contribution once the coordination
+     *         can no longer use it
+     * @dev Contributions are refundable when the coordination is Cancelled or
+     *      Expired, was never proposed at all, or when the proposer has closed
+     *      the executed stake via closeTeamStake(). The contribution is zeroed
+     *      before the transfer (CEI)
+     * @param intentHash Team stake intent hash
+     */
+    function withdrawTeamContribution(bytes32 intentHash) external nonReentrant {
+        uint256 amount = teamContributions[intentHash][msg.sender];
+        if (amount == 0) revert NothingToClaim();
+
+        Status status = states[intentHash].status;
+        bool coordinationOver =
+            status == Status.None || status == Status.Cancelled || status == Status.Expired;
+        bool stakeClosed = status == Status.Executed && teamStakes[intentHash].intentHash != bytes32(0)
+            && !teamStakes[intentHash].active;
+
+        if (!coordinationOver && !stakeClosed) revert ContributionLocked();
+
+        teamContributions[intentHash][msg.sender] = 0;
+        IERC20(gameToken).safeTransfer(msg.sender, amount);
+
+        emit TeamContributionWithdrawn(intentHash, msg.sender, amount);
+    }
+
+    /**
+     * @notice Close an executed team stake, letting members withdraw their
+     *         contributions via withdrawTeamContribution()
+     * @dev Only the coordination proposer may close; irreversible
+     * @param intentHash Team stake intent hash
+     */
+    function closeTeamStake(bytes32 intentHash) external nonReentrant {
+        TeamStake storage stake = teamStakes[intentHash];
+
+        if (stake.intentHash == bytes32(0)) revert StakeNotFound();
+        if (!stake.active) revert StakeNotActive();
+        if (msg.sender != states[intentHash].proposer) revert NotAuthorized();
+
+        stake.active = false;
+
+        emit TeamStakeClosed(intentHash);
     }
 
     /**
@@ -430,10 +524,10 @@ contract GameCoordination is AgentCoordination {
     function depositTeamRewards(bytes32 intentHash, uint256 amount) external nonReentrant {
         TeamStake storage stake = teamStakes[intentHash];
 
-        if (!stake.active) revert TournamentNotFound(); // Reusing error
+        if (!stake.active) revert StakeNotActive();
         if (amount == 0) revert InvalidEntryFee(); // Reusing error
 
-        _safeTransferFrom(stake.rewardToken, msg.sender, address(this), amount);
+        IERC20(stake.rewardToken).safeTransferFrom(msg.sender, address(this), amount);
 
         teamRewardPools[intentHash] += amount;
     }
@@ -441,13 +535,16 @@ contract GameCoordination is AgentCoordination {
     /**
      * @notice Distribute the deposited reward pool to all team members
      * @dev Only the coordination proposer may distribute; amount comes from
-     *      tracked deposits, never from a caller-supplied number
+     *      tracked deposits, never from a caller-supplied number. A share
+     *      whose transfer fails (blocklisted recipient, paused token) is
+     *      credited to unclaimedRewards instead of blocking the whole loop —
+     *      the member pulls it later via claimUnclaimedReward()
      * @param intentHash Team stake intent hash
      */
     function distributeTeamRewards(bytes32 intentHash) external nonReentrant {
         TeamStake storage stake = teamStakes[intentHash];
 
-        if (!stake.active) revert TournamentNotFound(); // Reusing error
+        if (!stake.active) revert StakeNotActive();
         if (msg.sender != states[intentHash].proposer) revert NotAuthorized();
 
         uint256 totalRewards = teamRewardPools[intentHash];
@@ -460,10 +557,28 @@ contract GameCoordination is AgentCoordination {
         uint256 perMemberShare = totalRewards / participants.length;
 
         for (uint256 i = 0; i < participants.length; i++) {
-            _safeTransfer(stake.rewardToken, participants[i], perMemberShare);
+            if (!IERC20(stake.rewardToken).trySafeTransfer(participants[i], perMemberShare)) {
+                unclaimedRewards[intentHash][participants[i]] += perMemberShare;
+                emit RewardShareUnclaimed(intentHash, participants[i], perMemberShare);
+            }
         }
 
         emit TeamRewardsDistributed(intentHash, totalRewards, perMemberShare);
+    }
+
+    /**
+     * @notice Pull a reward share that could not be delivered during
+     *         distributeTeamRewards()
+     * @param intentHash Team stake intent hash
+     */
+    function claimUnclaimedReward(bytes32 intentHash) external nonReentrant {
+        uint256 amount = unclaimedRewards[intentHash][msg.sender];
+        if (amount == 0) revert NothingToClaim();
+
+        unclaimedRewards[intentHash][msg.sender] = 0;
+        IERC20(teamStakes[intentHash].rewardToken).safeTransfer(msg.sender, amount);
+
+        emit UnclaimedRewardClaimed(intentHash, msg.sender, amount);
     }
 
     // ============ Battle Execution ============
@@ -472,13 +587,12 @@ contract GameCoordination is AgentCoordination {
      * @notice Execute battle coordination
      * @dev Sets up PvP battle between challenger and defender
      * @param intentHash The coordination intent hash
-     * @param payload Coordination payload
      * @param executionData Encoded (address challenger, uint256 wager)
      * @param state Coordination state (should have 2 participants)
      */
     function _executeBattle(
         bytes32 intentHash,
-        CoordinationPayload calldata payload,
+        CoordinationPayload calldata, /* payload */
         bytes calldata executionData,
         CoordinationState storage state
     ) internal returns (bool, bytes memory) {
@@ -495,8 +609,8 @@ contract GameCoordination is AgentCoordination {
             : state.participants[0];
 
         // Collect wagers from both players
-        _safeTransferFrom(gameToken, challenger, address(this), wager);
-        _safeTransferFrom(gameToken, defender, address(this), wager);
+        IERC20(gameToken).safeTransferFrom(challenger, address(this), wager);
+        IERC20(gameToken).safeTransferFrom(defender, address(this), wager);
 
         // Store battle data
         battles[intentHash] = Battle({
@@ -545,11 +659,11 @@ contract GameCoordination is AgentCoordination {
 
         if (winnerAddress == address(0)) {
             // Draw - return wagers to both players
-            _safeTransfer(gameToken, battle.challenger, battle.wager);
-            _safeTransfer(gameToken, battle.defender, battle.wager);
+            IERC20(gameToken).safeTransfer(battle.challenger, battle.wager);
+            IERC20(gameToken).safeTransfer(battle.defender, battle.wager);
         } else {
             // Winner takes all
-            _safeTransfer(gameToken, winnerAddress, totalPrize);
+            IERC20(gameToken).safeTransfer(winnerAddress, totalPrize);
         }
 
         emit BattleResolved(intentHash, winnerAddress, totalPrize);
@@ -561,13 +675,12 @@ contract GameCoordination is AgentCoordination {
      * @notice Execute loot share coordination
      * @dev Sets up fair distribution of loot among participants
      * @param intentHash The coordination intent hash
-     * @param payload Coordination payload containing item data
      * @param executionData Encoded (bytes32[] itemIds, uint8 distributionType)
      * @param state Coordination state with participants
      */
     function _executeLootShare(
         bytes32 intentHash,
-        CoordinationPayload calldata payload,
+        CoordinationPayload calldata, /* payload */
         bytes calldata executionData,
         CoordinationState storage state
     ) internal returns (bool, bytes memory) {
@@ -645,14 +758,12 @@ contract GameCoordination is AgentCoordination {
     /**
      * @notice Execute lobby coordination
      * @dev Simple lobby creation - returns immediately for off-chain game coordination
-     * @param intentHash The coordination intent hash
-     * @param payload Coordination payload
      * @param executionData Encoded (uint256 gameMode, bytes32 mapId)
      * @param state Coordination state with participants
      */
     function _executeLobby(
-        bytes32 intentHash,
-        CoordinationPayload calldata payload,
+        bytes32, /* intentHash */
+        CoordinationPayload calldata, /* payload */
         bytes calldata executionData,
         CoordinationState storage state
     ) internal view returns (bool, bytes memory) {
@@ -663,40 +774,6 @@ contract GameCoordination is AgentCoordination {
         // Lobby is primarily an off-chain coordination signal
         // Return data for game servers to use
         return (true, abi.encode(gameMode, mapId, state.participants.length));
-    }
-
-    // ============ Token Transfer Helpers ============
-
-    /**
-     * @notice Transfer tokens, reverting on failure
-     * @dev Checks return data because some ERC-20s return false instead of
-     *      reverting, and others (like USDT) return nothing at all
-     */
-    function _safeTransfer(address token, address to, uint256 amount) private {
-        (bool success, bytes memory returndata) = token.call(
-            abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount)
-        );
-        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
-            revert TransferFailed();
-        }
-    }
-
-    /**
-     * @notice Transfer tokens from an approved account, reverting on failure
-     * @dev Same return-data check as _safeTransfer
-     */
-    function _safeTransferFrom(address token, address from, address to, uint256 amount) private {
-        (bool success, bytes memory returndata) = token.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transferFrom(address,address,uint256)")),
-                from,
-                to,
-                amount
-            )
-        );
-        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
-            revert TransferFailed();
-        }
     }
 
     // ============ View Functions ============

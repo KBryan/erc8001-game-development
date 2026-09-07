@@ -4,29 +4,38 @@ pragma solidity ^0.8.26;
 import {AgentCoordination} from "./AgentCoordination.sol";
 import {AgentIntent, AcceptanceAttestation, CoordinationPayload, Status} from "./IAgentCoordination.sol";
 import {GameCoordination} from "./GameCoordination.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title MultiplayerGameLobby
  * @notice Simple game lobby using ERC-8001 coordination
  * @dev Enables multiplayer game lobbies with entry fees, player limits,
  *      and on-chain coordination status for off-chain game servers
- * 
+ *
  * ERC-8001 FLOW IN THIS CONTRACT:
+ * 0. Host approves this contract as their relayer on the coordination
+ *    contract (coordination.approveRelayer(lobby, true)) — once, ever
  * 1. Host creates AgentIntent (off-chain) with the EXACT final roster as the
  *    participants list (the list is fixed at proposal time by ERC-8001)
  * 2. Host calls createLobby() → proposeCoordination() (Status: Proposed)
- * 3. EVERY participant — the host included — calls joinLobby() with a signed
- *    AcceptanceAttestation and pays the entry fee → acceptCoordination().
+ * 3. EVERY participant — the host included — joins via joinLobby() with a
+ *    signed AcceptanceAttestation; the entry fee is pulled from the
+ *    attestation's participant (who approves the game token to this
+ *    contract), so a relayed join still charges the right account.
  *    The host gets no special treatment: ERC-8001 execution requires a real
  *    acceptance from every participant, so the host signs one like anyone else
- * 4. The lobby flips to Ready only when ALL intent participants have accepted,
- *    matching exactly the condition executeCoordination() enforces
- * 5. Anyone can call startGame() → executeCoordination() (Status: Executed)
+ * 4. A participant who already accepted directly on the coordination contract
+ *    can still joinLobby(): the acceptance step is skipped, but the fee is
+ *    collected and recorded, so no seat is ever unpaid
+ * 5. Anyone can call startGame() once every rostered player has paid and the
+ *    coordination is Ready → executeCoordination() (Status: Executed)
  * 6. After the off-chain game, the host calls declareWinner() to pay the
  *    collected entry-fee pot to the winner
  * 7. Off-chain game server monitors status to run actual gameplay
  */
 contract MultiplayerGameLobby {
+    using SafeERC20 for IERC20;
 
     // ============ State Structures ============
 
@@ -105,6 +114,12 @@ contract MultiplayerGameLobby {
 
     /// @notice Winner paid the entry-fee pot, per lobby (0x0 until declared)
     mapping(bytes32 => address) public lobbyWinner;
+
+    /// @notice Whether a player has paid the entry fee for a lobby
+    /// @dev The escrow ledger: refunds and the pot are computed strictly from
+    ///      this mapping, never from acceptance counts on the coordination
+    ///      contract, so one lobby can never drain another lobby's fees
+    mapping(bytes32 => mapping(address => bool)) public feePaid;
 
     // ============ Events ============
 
@@ -216,6 +231,10 @@ contract MultiplayerGameLobby {
      * @return lobbyId The created lobby ID (intent hash)
      * 
      * ERC-8001 FLOW:
+     * - PREREQUISITE: the host must have approved this contract as a relayer
+     *   on the coordination contract (coordination.approveRelayer(address(this),
+     *   true)) — proposeCoordination() only accepts submissions from the
+     *   proposer or a relayer they approved
      * - Host creates AgentIntent off-chain with EIP-712, listing the exact
      *   final roster (host included) as participants
      * - Calls proposeCoordination() → Status: Proposed
@@ -288,21 +307,28 @@ contract MultiplayerGameLobby {
     // ============ Join Lobby ============
 
     /**
-     * @notice Join lobby by accepting coordination
-     * @dev Player accepts coordination through ERC-8001
+     * @notice Join lobby by accepting coordination and paying the entry fee
+     * @dev The player is the attestation's participant, NOT msg.sender, so a
+     *      relayed submission still charges the right account: the entry fee
+     *      is pulled from the participant, who must have approved the game
+     *      token to this contract. If the participant already accepted
+     *      directly on the coordination contract, the acceptance step is
+     *      skipped but the fee is still collected and recorded — every seat
+     *      in a started game is a paid seat
      * @param lobbyId Lobby to join
      * @param attestation Signed acceptance attestation (EIP-712)
-     * 
+     *
      * ERC-8001 FLOW:
      * - Player creates AcceptanceAttestation off-chain
      * - Calls acceptCoordination() → adds acceptance
-     * - When all accept: Status → Ready
+     * - When all accept AND all paid: lobby Status → Ready
      */
     function joinLobby(
         bytes32 lobbyId,
         AcceptanceAttestation calldata attestation
     ) external lobbyExists(lobbyId) {
         GameLobby storage lobby = lobbies[lobbyId];
+        address player = attestation.participant;
 
         // Validate lobby state
         if (lobby.status == LobbyStatus.Starting || lobby.status == LobbyStatus.Active) {
@@ -318,30 +344,40 @@ contract MultiplayerGameLobby {
         // Validate player is invited
         bool isInvited = false;
         for (uint256 i = 0; i < lobby.players.length; i++) {
-            if (lobby.players[i] == msg.sender) {
+            if (lobby.players[i] == player) {
                 isInvited = true;
                 break;
             }
         }
         if (!isInvited) revert NotInvitedPlayer();
 
-        // Check not already joined
-        if (coordination.hasAccepted(lobbyId, msg.sender)) revert AlreadyJoined();
+        // Check not already joined (paid) through this lobby
+        if (feePaid[lobbyId][player]) revert AlreadyJoined();
 
-        // Collect entry fee
+        // Collect entry fee from the player — they approve this contract
         if (lobby.entryFee > 0) {
-            _safeTransferFrom(gameToken, msg.sender, address(this), lobby.entryFee);
+            IERC20(gameToken).safeTransferFrom(player, address(this), lobby.entryFee);
+        }
+        feePaid[lobbyId][player] = true;
+
+        // Accept coordination through ERC-8001, unless the player already
+        // accepted directly on the coordination contract (their on-chain
+        // acceptance is the consent; this call would revert as a duplicate)
+        if (!coordination.hasAccepted(lobbyId, player)) {
+            coordination.acceptCoordination(lobbyId, attestation);
         }
 
-        // Accept coordination through ERC-8001
-        bool allAccepted = coordination.acceptCoordination(lobbyId, attestation);
-
-        // Update lobby state. Ready only when ALL intent participants have
-        // accepted — the exact condition executeCoordination() enforces, so
-        // startGame() succeeds precisely when the lobby says Ready
+        // acceptedCount counts paid joins through this lobby; the pot and all
+        // refunds derive from it, so it moves only when a fee is escrowed
         lobby.acceptedCount += 1;
 
-        if (allAccepted) {
+        // Ready when the coordination reports unanimous acceptance — the
+        // exact condition executeCoordination() enforces — and every rostered
+        // player has paid. Consulting the coordination contract (rather than
+        // only this call's result) closes the race where the final acceptance
+        // lands directly on the coordination contract
+        (Status coordStatus,,,,) = coordination.getCoordinationStatus(lobbyId);
+        if (coordStatus == Status.Ready && lobby.acceptedCount == lobby.players.length) {
             lobby.status = LobbyStatus.Ready;
             emit LobbyReady(lobbyId, lobby.acceptedCount);
         } else {
@@ -350,7 +386,7 @@ contract MultiplayerGameLobby {
 
         emit PlayerJoined(
             lobbyId,
-            msg.sender,
+            player,
             lobby.acceptedCount,
             lobby.players.length
         );
@@ -369,6 +405,12 @@ contract MultiplayerGameLobby {
      * - Calls executeCoordination() → Status: Executed
      * - Triggers _executeInternal() hook in GameCoordination
      * - Returns success/failure with result data
+     *
+     * READY-RACE NOTE: the lobby may still show Created/Joining when the last
+     * acceptance landed directly on the coordination contract, so this
+     * function consults the source of truth instead of the cached status:
+     * it requires every rostered player to have paid, and lets the inner
+     * executeCoordination() enforce unanimous acceptance (coordination Ready)
      */
     function startGame(
         bytes32 lobbyId,
@@ -377,9 +419,13 @@ contract MultiplayerGameLobby {
     ) external lobbyExists(lobbyId) {
         GameLobby storage lobby = lobbies[lobbyId];
 
-        // Validate state
-        if (lobby.status != LobbyStatus.Ready) revert LobbyNotReady();
-        if (lobby.status == LobbyStatus.Active) revert LobbyAlreadyStarted();
+        // Validate state: anything at or past Starting is no longer startable
+        if (lobby.status >= LobbyStatus.Starting) revert LobbyAlreadyStarted();
+
+        // Every rostered player must have paid their entry fee
+        for (uint256 i = 0; i < lobby.players.length; i++) {
+            if (!feePaid[lobbyId][lobby.players[i]]) revert LobbyNotReady();
+        }
 
         // Update status
         lobby.status = LobbyStatus.Starting;
@@ -436,12 +482,12 @@ contract MultiplayerGameLobby {
 
     /**
      * @notice Declare the winner and pay out the collected entry-fee pot
-     * @dev The pot (entryFee x accepted players) otherwise has no exit: this
-     *      is the distribution path for fees collected in joinLobby(). Only
-     *      the host (the ERC-8001 proposer) may declare, the winner must be a
-     *      player who actually accepted (and therefore paid), and the pot is
-     *      paid exactly once. Callable while the game is Active, or after
-     *      finishGame() marked it Finished
+     * @dev The pot (entryFee x paid players) otherwise has no exit: this is
+     *      the distribution path for fees collected in joinLobby(). Only the
+     *      host (the ERC-8001 proposer) may declare, the winner must be a
+     *      player who actually paid, and the pot is paid exactly once.
+     *      Callable while the game is Active, or after finishGame() marked it
+     *      Finished
      * @param lobbyId Lobby ID
      * @param winner Player to receive the pot
      */
@@ -456,14 +502,16 @@ contract MultiplayerGameLobby {
             revert LobbyNotReady();
         }
         if (lobbyWinner[lobbyId] != address(0)) revert PotAlreadyPaid();
-        if (!coordination.hasAccepted(lobbyId, winner)) revert WinnerNotPlayer();
+        if (!feePaid[lobbyId][winner]) revert WinnerNotPlayer();
 
         lobbyWinner[lobbyId] = winner;
         lobby.status = LobbyStatus.Finished;
 
+        // acceptedCount is the number of paid joins, so the pot never exceeds
+        // what this lobby actually escrowed
         uint256 pot = lobby.entryFee * lobby.acceptedCount;
         if (pot > 0) {
-            _safeTransfer(gameToken, winner, pot);
+            IERC20(gameToken).safeTransfer(winner, pot);
         }
 
         emit WinnerDeclared(lobbyId, winner, pot);
@@ -492,19 +540,26 @@ contract MultiplayerGameLobby {
                          block.timestamp > lobby.createdAt + MAX_LOBBY_DURATION;
 
         if (!canCancel) revert NotHost();
-        if (lobby.status == LobbyStatus.Active || lobby.status == LobbyStatus.Finished) {
+        if (
+            lobby.status == LobbyStatus.Active || lobby.status == LobbyStatus.Finished
+                || lobby.status == LobbyStatus.Cancelled
+        ) {
             revert LobbyAlreadyStarted();
         }
 
         // Cancel coordination through ERC-8001
         coordination.cancelCoordination(lobbyId, reason);
 
-        // Refund entry fees to all who paid
-        // A failed refund is skipped rather than blocking cancellation
+        // Refund entry fees ONLY to players this lobby recorded as paid —
+        // acceptances on the coordination contract are not proof of payment
+        // here, and refunding by acceptance would let one lobby drain
+        // another's escrow. A failed refund is skipped rather than blocking
+        // cancellation
         for (uint256 i = 0; i < lobby.players.length; i++) {
             address player = lobby.players[i];
-            if (coordination.hasAccepted(lobbyId, player) && lobby.entryFee > 0) {
-                if (_tryTransfer(gameToken, player, lobby.entryFee)) {
+            if (feePaid[lobbyId][player] && lobby.entryFee > 0) {
+                if (IERC20(gameToken).trySafeTransfer(player, lobby.entryFee)) {
+                    feePaid[lobbyId][player] = false;
                     emit EntryFeeRefunded(lobbyId, player, lobby.entryFee);
                 }
             }
@@ -513,51 +568,6 @@ contract MultiplayerGameLobby {
         lobby.status = LobbyStatus.Cancelled;
 
         emit LobbyCancelled(lobbyId, msg.sender, reason);
-    }
-
-    // ============ Token Transfer Helpers ============
-
-    /**
-     * @notice Transfer tokens from an approved account, reverting on failure
-     * @dev Checks return data because some ERC-20s return false instead of
-     *      reverting, and others (like USDT) return nothing at all
-     */
-    function _safeTransferFrom(address token, address from, address to, uint256 amount) private {
-        (bool success, bytes memory returndata) = token.call(
-            abi.encodeWithSelector(
-                bytes4(keccak256("transferFrom(address,address,uint256)")),
-                from,
-                to,
-                amount
-            )
-        );
-        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
-            revert TransferFailed();
-        }
-    }
-
-    /**
-     * @notice Transfer tokens, reverting on failure
-     * @dev Same return-data check as _safeTransferFrom
-     */
-    function _safeTransfer(address token, address to, uint256 amount) private {
-        (bool success, bytes memory returndata) = token.call(
-            abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount)
-        );
-        if (!success || !(returndata.length == 0 || abi.decode(returndata, (bool)))) {
-            revert TransferFailed();
-        }
-    }
-
-    /**
-     * @notice Attempt a token transfer, returning success instead of reverting
-     * @dev Used in refund loops where one failed transfer must not block the rest
-     */
-    function _tryTransfer(address token, address to, uint256 amount) private returns (bool ok) {
-        (bool success, bytes memory returndata) = token.call(
-            abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount)
-        );
-        return success && (returndata.length == 0 || abi.decode(returndata, (bool)));
     }
 
     // ============ View Functions ============

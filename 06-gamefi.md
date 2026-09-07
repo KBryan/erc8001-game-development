@@ -248,6 +248,12 @@ contract GameStaking is ReentrancyGuard, Ownable {
         uint256 stakeId
     );
     event RewardAdded(uint256 amount);
+    event EmergencyUnstaked(
+        address indexed user,
+        uint256 amount,
+        uint256 forfeitedReward,
+        uint256 stakeId
+    );
 
     constructor(address _stakingToken, address _rewardToken) Ownable(msg.sender) {
         stakingToken = IERC20(_stakingToken);
@@ -342,6 +348,35 @@ contract GameStaking is ReentrancyGuard, Ownable {
     }
 
     /**
+     * @notice Withdraw principal only after the lock period, forfeiting all rewards
+     * @dev Escape hatch for when the reward pool is underfunded: unstake()
+     *      reverts if rewardPool cannot cover the earned reward, which would
+     *      otherwise freeze principal until the owner calls addRewards. Use
+     *      this only when you accept losing the reward -- the forfeited
+     *      amount stays in the reward pool for other stakers.
+     */
+    function emergencyUnstake(uint256 stakeId) external nonReentrant {
+        require(stakeId < userStakes[msg.sender].length, "Invalid stake ID");
+
+        Stake storage s = userStakes[msg.sender][stakeId];
+        require(!s.claimed, "Already claimed");
+        require(
+            block.timestamp >= s.startTime + s.duration,
+            "Lock period not ended"
+        );
+
+        // Record what is being given up before marking the stake claimed
+        uint256 forfeited = calculateReward(msg.sender, stakeId);
+        s.claimed = true;
+
+        totalStaked -= s.amount;
+
+        stakingToken.safeTransfer(msg.sender, s.amount);
+
+        emit EmergencyUnstaked(msg.sender, s.amount, forfeited, stakeId);
+    }
+
+    /**
      * @notice Add rewards to the pool
      */
     function addRewards(uint256 amount) external onlyOwner {
@@ -365,6 +400,8 @@ contract GameStaking is ReentrancyGuard, Ownable {
 
 <a id="lst:gamestaking"></a>
 
+Note the `emergencyUnstake` escape hatch: `unstake` reverts when the reward pool cannot cover the earned reward, which would otherwise freeze a staker's principal until the owner tops the pool up. After the lock period, `emergencyUnstake` returns principal only and forfeits the reward, so users are never dependent on the owner to recover their own tokens.
+
 ## Yield Integration with Morpho
 
 Morpho is a standalone lending protocol built around Morpho Blue---minimal, isolated lending markets---with MetaMorpho vaults layered on top for curated yield. (Its original incarnation as an optimizer on Aave and Compound has been deprecated.) Integrating Morpho allows games to generate passive income on treasury funds. Note that the `IMorpho` interface below is a simplified illustrative interface, not the production ABI---integrators should build against Morpho's published contracts.
@@ -375,6 +412,7 @@ Morpho is a standalone lending protocol built around Morpho Blue---minimal, isol
 pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -402,6 +440,8 @@ interface IMorpho {
  * @notice Manages game treasury yield through Morpho integration
  */
 contract YieldManager is Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     IMorpho public morpho;
     IERC20 public underlying;
     address public poolToken;
@@ -433,8 +473,10 @@ contract YieldManager is Ownable, ReentrancyGuard {
     function deposit(uint256 amount) external onlyOwner {
         require(amount > 0, "Zero amount");
         
-        underlying.transferFrom(msg.sender, address(this), amount);
-        underlying.approve(address(morpho), amount);
+        // SafeERC20 reverts on tokens that signal failure by returning false
+        // (a raw transferFrom would silently ignore that return value)
+        underlying.safeTransferFrom(msg.sender, address(this), amount);
+        underlying.forceApprove(address(morpho), amount);
         
         uint256 supplied = morpho.supply(poolToken, address(this), amount, 0);
         totalDeposited += supplied;
@@ -449,7 +491,7 @@ contract YieldManager is Ownable, ReentrancyGuard {
         uint256 withdrawn = morpho.withdraw(poolToken, amount);
         totalDeposited = totalDeposited > withdrawn ? totalDeposited - withdrawn : 0;
         
-        underlying.transfer(owner(), withdrawn);
+        underlying.safeTransfer(owner(), withdrawn);
         emit Withdrawn(withdrawn);
     }
     
@@ -586,7 +628,7 @@ contract PythPriceFeed {
     function calculateUsdValue(address token, uint256 /* amount */)
         external
         view
-        returns (uint256 usdValue)
+        returns (uint256)
     {
         revert TokenFeedNotConfigured(token);
     }

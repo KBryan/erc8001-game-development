@@ -273,6 +273,9 @@ contract SimplePyramid {
     /// @notice Total ETH distributed
     uint256 public totalDistributed;
 
+    /// @notice Total ETH paid to the creator as leftover fees from join()
+    uint256 public creatorFees;
+
     /// @notice Contract creator (receives remaining fees)
     address public immutable creator;
 
@@ -339,6 +342,7 @@ contract SimplePyramid {
 
         // Creator gets remainder
         if (remainingFee > 0) {
+            creatorFees += remainingFee;
             (bool success, ) = payable(creator).call{value: remainingFee}("");
             if (!success) revert TransferFailed();
         }
@@ -405,17 +409,20 @@ contract SimplePyramid {
 
     /**
      * @notice Get contract statistics
+     * @return participantCount Total participants including the creator
+     * @return distributed Total ETH paid out as commissions
+     * @return creatorEarnings ETH paid to the creator by this scheme
+     *         (tracked via the creatorFees accumulator -- the creator's
+     *         wallet balance would include unrelated funds)
      */
     function getStats() external view returns (
         uint256 participantCount,
         uint256 distributed,
-        uint256 creatorEarnings,
-        uint256 avgLevel
+        uint256 creatorEarnings
     ) {
         participantCount = totalParticipants;
         distributed = totalDistributed;
-        creatorEarnings = address(creator).balance;
-        // avgLevel calculation omitted for brevity
+        creatorEarnings = creatorFees;
     }
 
     // ============ Receive ============
