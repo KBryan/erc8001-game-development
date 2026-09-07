@@ -6,34 +6,33 @@ Gas optimization is critical for gaming contracts where users make frequent, oft
 
 ## Opcode Gas Costs
 
-| llc@{}}
-
-**Category** | **Operation** | **Gas** |
+| **Category** | **Operation** | **Gas** |
 |---|---|---|
-| \multirow{5}{*}{Arithmetic} | ADD/SUB | 3 |
-|  | MUL | 5 |
-|  | DIV/SDIV | 5 |
-|  | MOD | 5 |
-|  | EXP | 10 + 50 * byte length |
-| \multirow{4}{*}{Comparison} | LT/GT/SLT/SGT | 3 |
-|  | EQ | 3 |
-|  | ISZERO | 3 |
-|  | AND/OR/XOR/NOT | 3 |
-| \multirow{3}{*}{Memory} | MLOAD | 3 |
-|  | MSTORE | 3 + memory expansion |
-|  | MSTORE8 | 3 + memory expansion |
-| \multirow{3}{*}{Storage} | SLOAD (warm) | 100 |
-|  | SLOAD (cold) | 2100 |
-|  | SSTORE (clean to dirty) | 20000 / 100 refund |
-| \multirow{3}{*}{Control} | JUMP | 8 |
-|  | JUMPI | 10 |
-|  | CALL | 2600 + memory |
+| Arithmetic | ADD/SUB | 3 |
+| Arithmetic | MUL | 5 |
+| Arithmetic | DIV/SDIV | 5 |
+| Arithmetic | MOD | 5 |
+| Arithmetic | EXP | 10 + 50 * byte length |
+| Comparison | LT/GT/SLT/SGT | 3 |
+| Comparison | EQ | 3 |
+| Comparison | ISZERO | 3 |
+| Comparison | AND/OR/XOR/NOT | 3 |
+| Memory | MLOAD | 3 |
+| Memory | MSTORE | 3 + memory expansion |
+| Memory | MSTORE8 | 3 + memory expansion |
+| Storage | SLOAD (warm) | 100 |
+| Storage | SLOAD (cold) | 2,100 |
+| Storage | SSTORE (zero to nonzero) | 20,000 |
+| Storage | SSTORE (nonzero to nonzero) | 2,900 cold / 100 warm |
+| Storage | SSTORE (clearing to zero) | refunds 4,800 (post-London) |
+| Control | JUMP | 8 |
+| Control | JUMPI | 10 |
+| Control | CALL (cold account) | 2,600 + memory |
+| Control | CALL (warm account) | 100 + memory |
 
 ## Transaction Costs
 
-| lc@{}}
-
-**Transaction Type** | **Base Gas** |
+| **Transaction Type** | **Base Gas** |
 |---|---|
 | Simple transfer | 21,000 |
 | Token transfer (ERC20) | ~45,000 |
@@ -43,9 +42,7 @@ Gas optimization is critical for gaming contracts where users make frequent, oft
 
 ## Storage Optimization Patterns
 
-| lcc@{}}
-
-**Type** | **Bits** | **Per 256-bit Slot** |
+| **Type** | **Bits** | **Per 256-bit Slot** |
 |---|---|---|
 | address | 160 | 1 |
 | uint256 | 256 | 1 |
@@ -58,23 +55,28 @@ Gas optimization is critical for gaming contracts where users make frequent, oft
 
 ## Gas Optimization Checklist
 
+- [ ] Pack storage variables so related values share a 256-bit slot
+- [ ] Use custom errors instead of revert strings
+- [ ] Use `calldata` instead of `memory` for external function parameters
+- [ ] Apply `unchecked` only to provably-safe math (e.g., loop counters)
+- [ ] Cache repeated storage reads in local variables
+- [ ] Emit events instead of writing storage for historical data
+- [ ] Mark fixed values `immutable` or `constant`
+- [ ] Batch operations to amortize fixed per-transaction costs
+
 ## Layer-2 Gas Comparison
 
-| lccc@{}}
-
-**Operation** | **Ethereum** | **Base** | **Arbitrum** |
+| **Operation** | **Ethereum** | **Base** | **Arbitrum** |
 |---|---|---|---|
-| Simple transfer | \$2--5 | \$0.001 | \$0.10 |
-| ERC20 transfer | \$5--15 | \$0.01 | \$0.20 |
-| Token swap | \$20--50 | \$0.05 | \$0.50 |
-| NFT mint | \$10--30 | \$0.02 | \$0.30 |
-| Complex game tx | \$30--100 | \$0.05 | \$0.50 |
+| Simple transfer | $2--5 | $0.001 | $0.10 |
+| ERC20 transfer | $5--15 | $0.01 | $0.20 |
+| Token swap | $20--50 | $0.05 | $0.50 |
+| NFT mint | $10--30 | $0.02 | $0.30 |
+| Complex game tx | $30--100 | $0.05 | $0.50 |
 
 ## Cheat Code Quick Reference
 
-| p{5.5cm}p{8cm}@{}}
-
-**Cheat Code** | **Purpose** |
+| **Cheat Code** | **Purpose** |
 |---|---|
 | `vm.prank(address)` | Execute next call as address |
 | `vm.startPrank(address)` | Start pranking until stop |
@@ -92,5 +94,5 @@ Gas optimization is critical for gaming contracts where users make frequent, oft
 | `vm.store(address, bytes32, bytes32)` | Write storage slot |
 | `vm.createFork(string)` | Create network fork |
 | `vm.selectFork(uint256)` | Switch to fork |
-| `vm.makeAddr(string)` | Create labeled address |
+| `makeAddr("alice")` | Create labeled address (forge-std `Test` helper, not a `vm` cheatcode) |
 | `vm.label(address, string)` | Label existing address |

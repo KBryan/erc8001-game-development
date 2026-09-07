@@ -16,6 +16,10 @@ The DAO hack of 2016, exploiting a reentrancy vulnerability, resulted in a 60-mi
 contract VulnerablePayout {
     mapping(address => uint256) public balances;
 
+    function deposit() external payable {
+        balances[msg.sender] += msg.value;
+    }
+
     function withdraw() external {
         uint256 amount = balances[msg.sender];
         require(amount > 0, "No balance");
@@ -100,7 +104,7 @@ For complex contracts with multiple external calls, use OpenZeppelin's Reentranc
 
 ```solidity
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 contract ProtectedGame is ReentrancyGuard {
     mapping(address => uint256) public balances;
@@ -129,11 +133,11 @@ contract ProtectedGame is ReentrancyGuard {
 
 ### Read-Only Reentrancy
 
-A subtle variant: view functions that depend on state modified during a reentrant call.
+A subtle variant: the contract itself may be safe against direct reentrancy, yet a `view` function can expose inconsistent state during an external call. The victim is not the vault---it is any *third-party integrator* that reads the view function while the vault's ETH send is in flight.
 
 ```solidity
 
-contract ReadOnlyReentrancyVictim {
+contract GuardedVault {
     uint256 public totalDeposits;
     mapping(address => uint256) public deposits;
 
@@ -144,24 +148,48 @@ contract ReadOnlyReentrancyVictim {
 
     function withdraw() external {
         uint256 amount = deposits[msg.sender];
-        totalDeposits -= amount;
+        require(amount > 0, "No balance");
 
-        // State temporarily inconsistent during call
+        // Effects before interaction: withdraw() itself
+        // cannot be re-entered profitably
+        deposits[msg.sender] = 0;
+
+        // ...but totalDeposits is only reduced AFTER the send
         (bool success, ) = msg.sender.call{value: amount}("");
-        require(success);
+        require(success, "Transfer failed");
 
-        deposits[msg.sender] = 0; // Updated too late
+        totalDeposits -= amount;
     }
 
-    // Attacker can manipulate this view function
+    // Correct in isolation -- but stale while withdraw()'s
+    // external call is in flight: the ETH has already left,
+    // yet totalDeposits still counts it
     function getShare(address user) external view returns (uint256) {
         if (totalDeposits == 0) return 0;
         return (deposits[user] * 1e18) / totalDeposits;
     }
 }
+
+// Third-party protocol that trusts the vault's view function
+contract LendingIntegrator {
+    GuardedVault public vault;
+
+    constructor(address _vault) {
+        vault = GuardedVault(_vault);
+    }
+
+    function collateralValue(address user) public view returns (uint256) {
+        // If invoked from an attacker's receive() during
+        // vault.withdraw(), totalDeposits is inflated and every
+        // other depositor's share reads too low -- mispriced collateral
+        return vault.getShare(user);
+    }
+}
 ```
 
 *Read-only reentrancy vulnerability*
+
+The attacker calls `withdraw()` and, from the `receive()` callback, triggers the integrator (for example, a liquidation that prices collateral via `collateralValue`). The vault's own state machine is never violated---only observed at its inconsistent midpoint. Defenses: update *all* related state before the external call, or expose a reentrancy-lock check (`nonReentrantView`) that integrators can consult.
 
 ## Integer Overflow and Underflow
 
@@ -219,7 +247,7 @@ contract SecurePriceGame {
     uint256 public lastPrice;
     uint256 public lastUpdateTime;
     uint256 public constant MAX_PRICE_AGE = 1 hours;
-    uint256 public constant MAX_PRICE_DEVIATION = 10; // 10
+    uint256 public constant MAX_PRICE_DEVIATION = 10; // 10%
 
     function getValidatedPrice() public view returns (uint256) {
         (
@@ -295,7 +323,12 @@ Maximal Extractable Value (MEV) refers to profit miners/validators can extract b
 // VULNERABLE - Predictable outcome
 contract VulnerableLottery {
     uint256 public winningNumber;
+    uint256 public jackpot;
     bool public revealed;
+
+    function enter() external payable {
+        jackpot += msg.value;
+    }
 
     function reveal(uint256 secret) external {
         require(!revealed, "Already revealed");
@@ -320,46 +353,43 @@ contract VulnerableLottery {
 
 // SECURE - Commit-reveal scheme
 contract SecureLottery {
-    enum Phase { Commit, Reveal, Claim }
-    Phase public phase;
-
-    struct Commitment {
-        bytes32 hash;
-        uint256 blockNumber;
-    }
-
-    mapping(address => Commitment) public commitments;
+    mapping(address => bytes32) public commitments;
     mapping(address => uint256) public revealedNumbers;
 
-    uint256 public constant COMMIT_DURATION = 100 blocks;
-    uint256 public commitStartBlock;
+    uint256 public constant COMMIT_DURATION_BLOCKS = 100; // ~20 minutes at 12s blocks
+    uint256 public immutable commitStartBlock;
+
+    constructor() {
+        commitStartBlock = block.number;
+    }
 
     function commit(bytes32 hash) external {
-        require(phase == Phase.Commit, "Wrong phase");
-        require(commitments[msg.sender].hash == bytes32(0), "Already committed");
+        require(
+            block.number < commitStartBlock + COMMIT_DURATION_BLOCKS,
+            "Commit phase over"
+        );
+        require(commitments[msg.sender] == bytes32(0), "Already committed");
 
-        commitments[msg.sender] = Commitment({
-            hash: hash,
-            blockNumber: block.number
-        });
+        commitments[msg.sender] = hash;
     }
 
     function reveal(uint256 number, bytes32 salt) external {
-        require(phase == Phase.Reveal, "Wrong phase");
-
-        Commitment memory c = commitments[msg.sender];
-        require(c.hash != bytes32(0), "No commitment");
         require(
-            keccak256(abi.encodePacked(number, salt, msg.sender)) == c.hash,
+            block.number >= commitStartBlock + COMMIT_DURATION_BLOCKS,
+            "Still in commit phase"
+        );
+
+        bytes32 c = commitments[msg.sender];
+        require(c != bytes32(0), "No commitment");
+        require(
+            keccak256(abi.encodePacked(number, salt, msg.sender)) == c,
             "Invalid reveal"
         );
-        require(block.number > c.blockNumber + 10, "Too early");
 
         revealedNumbers[msg.sender] = number;
     }
 
     function claim() external {
-        require(phase == Phase.Claim, "Wrong phase");
         // Calculate winner from all revealed numbers...
     }
 }
@@ -367,14 +397,15 @@ contract SecureLottery {
 
 *Commit-reveal protection*
 
-### Access Controls
+## Access Control
+
+Privileged operations---pausing the game, changing parameters, emergency withdrawals---must be restricted to authorized accounts. OpenZeppelin's `AccessControl` assigns fine-grained roles rather than concentrating every power in a single owner.
 
 ```solidity
 
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
-contract AccessControlledGame is Ownable, AccessControl {
+contract AccessControlledGame is AccessControl {
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
@@ -383,6 +414,7 @@ contract AccessControlledGame is Ownable, AccessControl {
     constructor() {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(OPERATOR_ROLE, msg.sender);
+        _grantRole(PAUSER_ROLE, msg.sender);
     }
 
     modifier whenNotPaused() {
@@ -394,12 +426,12 @@ contract AccessControlledGame is Ownable, AccessControl {
         paused = true;
     }
 
-    function unpause() external onlyOwner {
+    function unpause() external onlyRole(PAUSER_ROLE) {
         paused = false;
     }
 
-    function emergencyWithdraw() external onlyOwner {
-        payable(owner()).transfer(address(this).balance);
+    function emergencyWithdraw() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        payable(msg.sender).transfer(address(this).balance);
     }
 }
 ```
@@ -415,10 +447,13 @@ contract AccessControlledGame is Ownable, AccessControl {
 // INSECURE - Do not use for value
 contract InsecureRandom {
     function badRandom() public view returns (uint256) {
-        // All manipulatable by miners
+        // All observable or influenceable by the block proposer.
+        // Post-Merge, prevrandao is not miner-mined difficulty: the
+        // proposer can still bias it a limited amount, so it is
+        // unsuitable for high-value randomness.
         return uint256(keccak256(abi.encodePacked(
             block.timestamp,
-            block.difficulty,
+            block.prevrandao,
             msg.sender
         )));
     }
@@ -428,8 +463,6 @@ contract InsecureRandom {
 *Insecure randomness sources*
 
 ## Security Checklist
-
-| p{1cm}p{6cm}p{6cm}@{}}
 
 **No.** | **Check** | **Tool/Method** |
 |---|---|---|

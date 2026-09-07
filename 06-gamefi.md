@@ -15,16 +15,16 @@ A modern GameFi ecosystem consists of:
 
 ## GameToken Contract
 
-The foundation of any GameFi ecosystem is a well-designed token with gaming-specific features.
+The foundation of any GameFi ecosystem is a well-designed token with gaming-specific features. Balance locks are managed by authorized game contracts (holders do not lock or unlock their own tokens), and both locks and the admin's pause are enforced on every transfer through an `_update` override (OpenZeppelin v5 replaced the `_beforeTokenTransfer`/`_afterTokenTransfer` hooks with this single function).
 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title GameToken
@@ -100,21 +100,41 @@ contract GameToken is ERC20, AccessControl, Pausable {
     }
     
     /**
-     * @notice Lock tokens for in-game activities
+     * @notice Lock a user's tokens for in-game activities
+     * @dev Only game contracts may lock; locks are enforced on every
+     *      transfer via _update
      */
-    function lock(uint256 amount) external {
-        require(balanceOf(msg.sender) >= amount, "Insufficient balance");
-        lockedBalance[msg.sender] += amount;
-        emit BalanceLocked(msg.sender, amount);
+    function lock(address user, uint256 amount) external onlyRole(GAME_CONTRACT_ROLE) {
+        require(
+            balanceOf(user) - lockedBalance[user] >= amount,
+            "Insufficient unlocked balance"
+        );
+        lockedBalance[user] += amount;
+        emit BalanceLocked(user, amount);
     }
-    
+
     /**
-     * @notice Unlock tokens
+     * @notice Unlock a user's tokens
+     * @dev Only game contracts may release locks they placed
      */
-    function unlock(uint256 amount) external {
-        require(lockedBalance[msg.sender] >= amount, "Insufficient locked");
-        lockedBalance[msg.sender] -= amount;
-        emit BalanceUnlocked(msg.sender, amount);
+    function unlock(address user, uint256 amount) external onlyRole(GAME_CONTRACT_ROLE) {
+        require(lockedBalance[user] >= amount, "Insufficient locked");
+        lockedBalance[user] -= amount;
+        emit BalanceUnlocked(user, amount);
+    }
+
+    /**
+     * @notice Pause all token transfers
+     */
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @notice Resume token transfers
+     */
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
     }
     
     /**
@@ -138,6 +158,29 @@ contract GameToken is ERC20, AccessControl, Pausable {
         );
         return transfer(to, amount);
     }
+
+    /**
+     * @dev Enforces the pause state and locked balances on all transfers
+     *      and burns. Minting is unaffected by locks.
+     *      OZ v5 replaced the _beforeTokenTransfer/_afterTokenTransfer hooks
+     *      with a single _update override; balances are still untouched here
+     *      until super._update runs, so the unlocked-balance check reads
+     *      pre-transfer state.
+     */
+    function _update(address from, address to, uint256 value)
+        internal
+        override
+        whenNotPaused
+    {
+        if (from != address(0)) {
+            require(
+                balanceOf(from) - lockedBalance[from] >= value,
+                "Insufficient unlocked balance"
+            );
+        }
+
+        super._update(from, to, value);
+    }
 }
 ```
 
@@ -152,9 +195,9 @@ Staking allows players to earn rewards by locking their tokens.
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -165,10 +208,10 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
  */
 contract GameStaking is ReentrancyGuard, Ownable {
     using SafeERC20 for IERC20;
-    
+
     IERC20 public stakingToken;
     IERC20 public rewardToken;
-    
+
     struct Stake {
         uint256 amount;
         uint256 startTime;
@@ -176,62 +219,68 @@ contract GameStaking is ReentrancyGuard, Ownable {
         uint256 rewardRate;
         bool claimed;
     }
-    
+
     struct Tier {
         uint256 minDuration;
         uint256 maxDuration;
-        uint256 baseAPY; // Basis points (10000 = 100
+        uint256 baseAPY; // Basis points (10000 = 100%)
         uint256 multiplier; // Tier bonus in bps
     }
-    
+
     mapping(address => Stake[]) public userStakes;
     mapping(uint256 => Tier) public tiers;
     uint256 public tierCount;
-    
+
     uint256 public totalStaked;
     uint256 public rewardPool;
-    
+
     // Events
     event Staked(
-        address indexed user, 
-        uint256 amount, 
-        uint256 duration, 
+        address indexed user,
+        uint256 amount,
+        uint256 duration,
         uint256 stakeId
     );
     event Unstaked(
-        address indexed user, 
-        uint256 amount, 
-        uint256 reward, 
+        address indexed user,
+        uint256 amount,
+        uint256 reward,
         uint256 stakeId
     );
     event RewardAdded(uint256 amount);
-    
-    constructor(address _stakingToken, address _rewardToken) {
+    event EmergencyUnstaked(
+        address indexed user,
+        uint256 amount,
+        uint256 forfeitedReward,
+        uint256 stakeId
+    );
+
+    constructor(address _stakingToken, address _rewardToken) Ownable(msg.sender) {
         stakingToken = IERC20(_stakingToken);
         rewardToken = IERC20(_rewardToken);
-        
+
         // Initialize tiers
-        tiers[0] = Tier(7 days, 30 days, 500, 1000);   // 5
-        tiers[1] = Tier(30 days, 90 days, 1000, 1500); // 10
-        tiers[2] = Tier(90 days, 365 days, 1500, 2500); // 15
+        tiers[0] = Tier(7 days, 30 days, 500, 1000);   // 5% APY
+        tiers[1] = Tier(30 days, 90 days, 1000, 1500); // 10% APY
+        tiers[2] = Tier(90 days, 365 days, 1500, 2500); // 15% APY
         tierCount = 3;
     }
-    
+
     /**
      * @notice Stake tokens for a specified duration
      */
-    function stake(uint256 amount, uint256 duration) 
-        external 
-        nonReentrant 
-        returns (uint256 stakeId) 
+    function stake(uint256 amount, uint256 duration)
+        external
+        nonReentrant
+        returns (uint256 stakeId)
     {
         require(amount > 0, "Cannot stake 0");
-        
+
         Tier memory tier = _getTier(duration);
         require(tier.minDuration > 0, "Invalid duration");
-        
+
         stakingToken.safeTransferFrom(msg.sender, address(this), amount);
-        
+
         Stake memory newStake = Stake({
             amount: amount,
             startTime: block.timestamp,
@@ -239,63 +288,94 @@ contract GameStaking is ReentrancyGuard, Ownable {
             rewardRate: tier.baseAPY + tier.multiplier,
             claimed: false
         });
-        
+
         stakeId = userStakes[msg.sender].length;
         userStakes[msg.sender].push(newStake);
-        
+
         totalStaked += amount;
-        
+
         emit Staked(msg.sender, amount, duration, stakeId);
         return stakeId;
     }
-    
+
     /**
      * @notice Calculate pending rewards for a stake
      */
-    function calculateReward(address user, uint256 stakeId) 
-        public 
-        view 
-        returns (uint256) 
+    function calculateReward(address user, uint256 stakeId)
+        public
+        view
+        returns (uint256)
     {
         require(stakeId < userStakes[user].length, "Invalid stake ID");
         Stake memory s = userStakes[user][stakeId];
-        
+
         if (s.claimed) return 0;
-        
+
         uint256 timeStaked = block.timestamp - s.startTime;
         uint256 effectiveTime = timeStaked > s.duration ? s.duration : timeStaked;
-        
+
         // reward = amount * rate * time / (365 days * 10000)
         return (s.amount * s.rewardRate * effectiveTime) / (365 days * 10000);
     }
-    
+
     /**
      * @notice Unstake and claim rewards after lock period
      */
     function unstake(uint256 stakeId) external nonReentrant {
         require(stakeId < userStakes[msg.sender].length, "Invalid stake ID");
-        
+
         Stake storage s = userStakes[msg.sender][stakeId];
         require(!s.claimed, "Already claimed");
         require(
             block.timestamp >= s.startTime + s.duration,
             "Lock period not ended"
         );
-        
-        s.claimed = true;
+
+        // Compute the reward before marking the stake claimed --
+        // calculateReward returns 0 for claimed stakes
         uint256 reward = calculateReward(msg.sender, stakeId);
-        
+        s.claimed = true;
+
         require(rewardPool >= reward, "Insufficient reward pool");
-        
+
         totalStaked -= s.amount;
         rewardPool -= reward;
-        
+
         stakingToken.safeTransfer(msg.sender, s.amount);
         rewardToken.safeTransfer(msg.sender, reward);
-        
+
         emit Unstaked(msg.sender, s.amount, reward, stakeId);
     }
-    
+
+    /**
+     * @notice Withdraw principal only after the lock period, forfeiting all rewards
+     * @dev Escape hatch for when the reward pool is underfunded: unstake()
+     *      reverts if rewardPool cannot cover the earned reward, which would
+     *      otherwise freeze principal until the owner calls addRewards. Use
+     *      this only when you accept losing the reward -- the forfeited
+     *      amount stays in the reward pool for other stakers.
+     */
+    function emergencyUnstake(uint256 stakeId) external nonReentrant {
+        require(stakeId < userStakes[msg.sender].length, "Invalid stake ID");
+
+        Stake storage s = userStakes[msg.sender][stakeId];
+        require(!s.claimed, "Already claimed");
+        require(
+            block.timestamp >= s.startTime + s.duration,
+            "Lock period not ended"
+        );
+
+        // Record what is being given up before marking the stake claimed
+        uint256 forfeited = calculateReward(msg.sender, stakeId);
+        s.claimed = true;
+
+        totalStaked -= s.amount;
+
+        stakingToken.safeTransfer(msg.sender, s.amount);
+
+        emit EmergencyUnstaked(msg.sender, s.amount, forfeited, stakeId);
+    }
+
     /**
      * @notice Add rewards to the pool
      */
@@ -304,7 +384,7 @@ contract GameStaking is ReentrancyGuard, Ownable {
         rewardPool += amount;
         emit RewardAdded(amount);
     }
-    
+
     function _getTier(uint256 duration) internal view returns (Tier memory) {
         for (uint256 i = 0; i < tierCount; i++) {
             if (duration >= tiers[i].minDuration && duration <= tiers[i].maxDuration) {
@@ -320,18 +400,21 @@ contract GameStaking is ReentrancyGuard, Ownable {
 
 <a id="lst:gamestaking"></a>
 
+Note the `emergencyUnstake` escape hatch: `unstake` reverts when the reward pool cannot cover the earned reward, which would otherwise freeze a staker's principal until the owner tops the pool up. After the lock period, `emergencyUnstake` returns principal only and forfeits the reward, so users are never dependent on the owner to recover their own tokens.
+
 ## Yield Integration with Morpho
 
-Morpho is a lending protocol optimizer that improves yields on Aave and Compound. Integrating Morpho allows games to generate passive income on treasury funds.
+Morpho is a standalone lending protocol built around Morpho Blue---minimal, isolated lending markets---with MetaMorpho vaults layered on top for curated yield. (Its original incarnation as an optimizer on Aave and Compound has been deprecated.) Integrating Morpho allows games to generate passive income on treasury funds. Note that the `IMorpho` interface below is a simplified illustrative interface, not the production ABI---integrators should build against Morpho's published contracts.
 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 interface IMorpho {
     function supply(
@@ -357,6 +440,8 @@ interface IMorpho {
  * @notice Manages game treasury yield through Morpho integration
  */
 contract YieldManager is Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     IMorpho public morpho;
     IERC20 public underlying;
     address public poolToken;
@@ -375,7 +460,7 @@ contract YieldManager is Ownable, ReentrancyGuard {
         address _underlying,
         address _poolToken,
         uint256 _minReserve
-    ) {
+    ) Ownable(msg.sender) {
         morpho = IMorpho(_morpho);
         underlying = IERC20(_underlying);
         poolToken = _poolToken;
@@ -388,8 +473,10 @@ contract YieldManager is Ownable, ReentrancyGuard {
     function deposit(uint256 amount) external onlyOwner {
         require(amount > 0, "Zero amount");
         
-        underlying.transferFrom(msg.sender, address(this), amount);
-        underlying.approve(address(morpho), amount);
+        // SafeERC20 reverts on tokens that signal failure by returning false
+        // (a raw transferFrom would silently ignore that return value)
+        underlying.safeTransferFrom(msg.sender, address(this), amount);
+        underlying.forceApprove(address(morpho), amount);
         
         uint256 supplied = morpho.supply(poolToken, address(this), amount, 0);
         totalDeposited += supplied;
@@ -404,7 +491,7 @@ contract YieldManager is Ownable, ReentrancyGuard {
         uint256 withdrawn = morpho.withdraw(poolToken, amount);
         totalDeposited = totalDeposited > withdrawn ? totalDeposited - withdrawn : 0;
         
-        underlying.transfer(owner(), withdrawn);
+        underlying.safeTransfer(owner(), withdrawn);
         emit Withdrawn(withdrawn);
     }
     
@@ -445,12 +532,12 @@ contract YieldManager is Ownable, ReentrancyGuard {
 
 ## Pyth Oracle Integration
 
-Accurate price feeds are essential for GameFi valuations and reward calculations.
+Accurate price feeds are essential for GameFi valuations and reward calculations. Pyth reports each price as an integer plus an exponent (`price * 10^expo`, where `expo` is typically negative), and different feeds use different exponents---so the contract normalizes every price and confidence value to a fixed 8-decimal format via `_scaleTo8Decimals` before returning it, and rejects positive exponents outright with `UnsupportedExponent`. Note also that `calculateUsdValue` reverts with `TokenFeedNotConfigured` rather than returning a value: this contract wires up only the ETH/USD and BTC/USD feeds and has no token-to-feed registry, and reverting loudly is safer than the alternative of silently returning 0 and making every reward appear worthless.
 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 interface IPyth {
     struct Price {
@@ -483,6 +570,8 @@ contract PythPriceFeed {
     error StalePrice();
     error InvalidPrice();
     error ConfidenceTooLow();
+    error UnsupportedExponent(int32 expo);
+    error TokenFeedNotConfigured(address token);
     
     constructor(address _pyth) {
         pyth = IPyth(_pyth);
@@ -493,11 +582,11 @@ contract PythPriceFeed {
      */
     function getEthPrice() external view returns (uint256 price, uint256 timestamp) {
         IPyth.Price memory p = pyth.getPriceNoOlderThan(ETH_USD, maxPriceAge);
-        
+
         _validatePrice(p);
-        
-        // Convert to 8 decimal format
-        return (uint256(uint64(p.price)), p.publishTime);
+
+        // Convert to 8 decimal format using the feed's exponent
+        return (_scaleTo8Decimals(uint256(uint64(p.price)), p.expo), p.publishTime);
     }
     
     /**
@@ -509,12 +598,14 @@ contract PythPriceFeed {
         returns (uint256 price, uint256 confidence, uint256 timestamp) 
     {
         IPyth.Price memory p = pyth.getPriceNoOlderThan(priceId, maxPriceAge);
-        
+
         _validatePrice(p);
-        
+
+        // Normalize both price and confidence to 8 decimals so callers can
+        // compare feeds with different exponents directly
         return (
-            uint256(uint64(p.price)),
-            uint256(p.conf),
+            _scaleTo8Decimals(uint256(uint64(p.price)), p.expo),
+            _scaleTo8Decimals(uint256(p.conf), p.expo),
             p.publishTime
         );
     }
@@ -528,35 +619,47 @@ contract PythPriceFeed {
     
     /**
      * @notice Calculate game reward in USD terms
+     * @dev This contract only wires up the ETH/USD and BTC/USD Pyth feeds --
+     *      it has no token -> price-feed registry, so a token/ETH price
+     *      cannot be looked up here. Rather than silently returning 0 (the
+     *      old behavior, which made every reward appear worthless), it
+     *      reverts with a clear error until such a registry is added.
      */
-    function calculateUsdValue(address token, uint256 amount) 
-        external 
-        view 
-        returns (uint256 usdValue) 
+    function calculateUsdValue(address token, uint256 /* amount */)
+        external
+        view
+        returns (uint256)
     {
-        // This would integrate with multiple price feeds
-        // Simplified for demonstration
-        (uint256 ethPrice,) = this.getEthPrice();
-        
-        // Example: token priced in ETH
-        uint256 tokenPriceInEth = getTokenPriceInEth(token);
-        
-        usdValue = (amount * tokenPriceInEth * ethPrice) / 1e26; // Adjust decimals
+        revert TokenFeedNotConfigured(token);
     }
-    
+
     function _validatePrice(IPyth.Price memory p) internal pure {
         if (p.price <= 0) revert InvalidPrice();
-        
+
         // Check confidence interval
         uint256 priceAbs = uint256(uint64(p.price > 0 ? p.price : -p.price));
         if (uint256(p.conf) * 10 > priceAbs) {
             revert ConfidenceTooLow();
         }
     }
-    
-    function getTokenPriceInEth(address token) internal pure returns (uint256) {
-        // Placeholder - would query DEX or additional price feed
-        return 0;
+
+    /**
+     * @dev Pyth reports values as `value * 10^expo` (expo is usually
+     *      negative, e.g. -8 means 8 decimals). Normalize to 8 decimals:
+     *      - expo == -8: already correct
+     *      - expo >  -8 (fewer decimals): multiply by 10^(8 + expo)
+     *      - expo <  -8 (more decimals):  divide by 10^(-(8 + expo))
+     *      Positive exponents are rejected as unsupported (no USD feed
+     *      uses them, and accepting one silently would be a footgun).
+     */
+    function _scaleTo8Decimals(uint256 value, int32 expo) internal pure returns (uint256) {
+        if (expo > 0 || expo < -77) revert UnsupportedExponent(expo);
+
+        if (expo >= -8) {
+            return value * 10 ** uint256(int256(8 + expo));
+        } else {
+            return value / 10 ** uint256(-int256(8 + expo));
+        }
     }
 }
 ```
@@ -572,10 +675,10 @@ Randomized rewards require verifiable entropy. This implementation uses a commit
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -589,7 +692,7 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
     struct LootBox {
         string name;
         uint256 price;
-        uint256[] probabilities; // Basis points (10000 = 100
+        uint256[] probabilities; // Basis points (10000 = 100%)
         uint256[] rewards;
         bool active;
     }
@@ -622,7 +725,7 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
         uint256 reward
     );
     
-    constructor(address _paymentToken) {
+    constructor(address _paymentToken) Ownable(msg.sender) {
         paymentToken = IERC20(_paymentToken);
     }
     
@@ -643,7 +746,7 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
         for (uint256 i = 0; i < probabilities.length; i++) {
             total += probabilities[i];
         }
-        require(total == 10000, "Probabilities must sum to 100
+        require(total == 10000, "Probabilities must sum to 100%");
         
         boxId = boxCount++;
         lootBoxes[boxId] = LootBox({
@@ -697,24 +800,32 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
         
         require(req.user != address(0), "Request not found");
         require(!req.revealed, "Already revealed");
+        // Strictly after the target block: at block.number == commitBlock +
+        // REVEAL_DELAY, blockhash(commitBlock + REVEAL_DELAY) is the current
+        // block and returns 0, which would let a player who chose their
+        // entropy offline force a known outcome.
         require(
-            block.number >= req.commitBlock + REVEAL_DELAY,
+            block.number > req.commitBlock + REVEAL_DELAY,
             "Too early"
         );
+        // Expire the commit once the target blockhash leaves the 256-block
+        // window; a stale reveal must never fall through to a predictable 0.
         require(
             block.number < req.commitBlock + MAX_COMMIT_AGE,
-            "Too late - blockhash unavailable"
+            "Too late - commit expired"
         );
-        
+
         // Verify entropy matches commitment
         require(
             keccak256(abi.encodePacked(entropy)) == req.entropyHash,
             "Invalid entropy"
         );
-        
+
         // Generate randomness from future blockhash + user entropy
+        bytes32 targetHash = blockhash(req.commitBlock + REVEAL_DELAY);
+        require(targetHash != bytes32(0), "Blockhash unavailable");
         bytes32 randomness = keccak256(abi.encodePacked(
-            blockhash(req.commitBlock + REVEAL_DELAY),
+            targetHash,
             entropy,
             requestId
         ));
@@ -722,7 +833,7 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
         req.revealed = true;
         
         // Determine rarity
-        uint256 roll = uint256(randomness) 
+        uint256 roll = uint256(randomness) % 10000;
         LootBox memory box = lootBoxes[req.boxId];
         
         Rarity rarity;
@@ -753,9 +864,5 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
 *LootBoxManager with entropy system*
 
 <a id="lst:lootbox"></a>
-
-## GameFi Architecture Diagram
-
-> **Figure**: Figure
 
 With the GameFi foundation established, Chapter 7 explores lottery systems with verifiable randomness.

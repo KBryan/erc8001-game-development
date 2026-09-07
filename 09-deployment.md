@@ -8,13 +8,12 @@ Deploying gaming contracts to production requires careful planning across multip
 
 ### Ethereum Mainnet vs Layer-2
 
-| lccc@{}}
-
-**Factor** | **Ethereum** | **Base** | **Arbitrum** |
+| **Factor** | **Ethereum** | **Base** | **Arbitrum** |
 |---|---|---|---|
-| Gas Cost (simple tx) | \$5--50 | \$0.01--0.10 | \$0.10--0.50 |
+| Gas Cost (simple tx) | $5--50 | $0.01--0.10 | $0.10--0.50 |
 | Block Time | 12 sec | 2 sec | 0.25 sec |
-| Finality | 15 min | 15 min | 7 days |
+| Soft Confirmation | ~15 min (finality) | seconds | seconds |
+| Withdrawal Finality | N/A | ~7 days (challenge window) | ~7 days (challenge window) |
 | TVL Security | Highest | High | High |
 | Ecosystem Maturity | Maximum | Growing | Mature |
 | Bridge Risk | N/A | Canonical | Canonical |
@@ -27,7 +26,7 @@ Gaming contracts require frequent, low-value transactions:
 - Claiming rewards
 - In-game purchases
 
-With Ethereum mainnet gas costs at 20--100 gwei, a simple bet costing 50,000 gas would cost \$2--10. On Base, the same transaction costs under \$0.01.
+With Ethereum mainnet gas costs at 20--100 gwei, a simple bet costing 50,000 gas would cost $2--10. On Base, the same transaction costs under $0.01.
 
 ## Foundry Deployment Scripts
 
@@ -36,7 +35,7 @@ With Ethereum mainnet gas costs at 20--100 gwei, a simple bet costing 50,000 gas
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Script.sol";
 import "../src/SimpleLottery.sol";
@@ -70,11 +69,11 @@ contract DeploySimpleLottery is Script {
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Script.sol";
-import "../src/GameFi/GameToken.sol";
-import "../src/GameFi/GameStaking.sol";
+import "../src/GameToken.sol";
+import "../src/GameStaking.sol";
 
 contract DeployGameFi is Script {
     struct NetworkConfig {
@@ -86,16 +85,19 @@ contract DeployGameFi is Script {
     mapping(uint256 => NetworkConfig) public configs;
     
     constructor() {
+        // Admin address comes from the environment so no key is hardcoded
+        address admin = vm.envOr("GAMEFI_ADMIN", address(0));
+
         // Base Mainnet
         configs[8453] = NetworkConfig({
-            admin: 0x..., // Your address
+            admin: admin,
             maxSupply: 1_000_000_000 ether,
             dailyMintLimit: 100_000 ether
         });
-        
+
         // Arbitrum One
         configs[42161] = NetworkConfig({
-            admin: 0x...,
+            admin: admin,
             maxSupply: 1_000_000_000 ether,
             dailyMintLimit: 100_000 ether
         });
@@ -148,11 +150,11 @@ contract DeployGameFi is Script {
 # foundry.toml - Base configuration
 [rpc_endpoints]
 base = "${BASE_RPC_URL}"
-base_goerli = "https://goerli.base.org"
+base_sepolia = "https://sepolia.base.org"
 
 [etherscan]
 base = { key = "${BASESCAN_API_KEY}", url = "https://api.basescan.org/api" }
-base_goerli = { key = "${BASESCAN_API_KEY}", url = "https://api-goerli.basescan.org/api" }
+base_sepolia = { key = "${BASESCAN_API_KEY}", url = "https://api-sepolia.basescan.org/api" }
 ```
 
 *Base network configuration*
@@ -167,7 +169,7 @@ export BASESCAN_API_KEY="your-api-key"
 export PRIVATE_KEY="0x..."
 
 # Deploy to Base
-cd /root/ethereum-games-book
+cd ethereum-games-book
 forge script script/DeployGameFi.s.sol:DeployGameFi \
     --rpc-url base \
     --broadcast \
@@ -289,15 +291,14 @@ forge script script/Deploy.s.sol \
 
 ## Post-Deployment Tasks
 
-### Ownership Transfer
+### Admin Handover
 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Script.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
 contract PostDeployment is Script {
@@ -308,27 +309,28 @@ contract PostDeployment is Script {
         
         vm.startBroadcast(deployerKey);
         
-        // Transfer ownership
-        Ownable(token).transferOwnership(newOwner);
-        
-        // Grant admin role
-        AccessControl(token).grantRole(
-            keccak256("DEFAULT_ADMIN_ROLE"),
-            newOwner
-        );
-        
+        // GameToken is AccessControl-based, not Ownable: there is no owner
+        // to transfer -- the roles ARE the ownership, so the handoff below
+        // (grant to newOwner, renounce as deployer) is the whole job.
+
+        // Grant admin role.
+        // CAUTION: DEFAULT_ADMIN_ROLE is bytes32(0), NOT keccak256 of its
+        // name -- hashing the name grants a meaningless role while the
+        // deployer silently keeps real admin.
+        bytes32 adminRole = AccessControl(token).DEFAULT_ADMIN_ROLE();
+        AccessControl(token).grantRole(adminRole, newOwner);
+
         // Renounce deployer roles
-        AccessControl(token).renounceRole(
-            keccak256("DEFAULT_ADMIN_ROLE"),
-            vm.addr(deployerKey)
-        );
+        AccessControl(token).renounceRole(adminRole, vm.addr(deployerKey));
         
         vm.stopBroadcast();
     }
 }
 ```
 
-*Post-deployment ownership transfer*
+*Post-deployment admin handover*
+
+Because `GameToken` uses `AccessControl` rather than `Ownable`, there is no `transferOwnership` call to make---the roles are the ownership, and handing over admin means granting `DEFAULT_ADMIN_ROLE` to the new owner and renouncing it as the deployer. Note the way the admin role is read from the contract rather than hashed by name. OpenZeppelin's `DEFAULT_ADMIN_ROLE` is `bytes32(0)`, not `keccak256("DEFAULT_ADMIN_ROLE")` -- a script that hashes the name grants and renounces a role nobody checks, leaving the deployer silently in control while the handover appears to succeed.
 
 ### Emergency Procedures
 
@@ -375,7 +377,7 @@ const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
 
 // Monitor for large bets
 contract.on("BetPlaced", (commitHash, player, amount, target, payout) => {
-    if (ethers.formatEther(amount) > "10") {
+    if (amount > ethers.parseEther("10")) {
         console.log(`Large bet detected: ${player} bet ${amount}`);
         // Alert logic here
     }
@@ -398,17 +400,15 @@ contract.on("BetPlaced", (_, player) => {
 
 ## Deployment Checklist
 
-| p{1cm}p{6cm}p{7cm}@{}}
-
-**Step** | **Task** | **Verification** |
+| **Step** | **Task** | **Verification** |
 |---|---|---|
 | 1 | Run full test suite | `forge test --fork-url mainnet` |
 | 2 | Verify gas snapshots | `forge snapshot --diff` |
-| 3 | Deploy to testnet | Verify on Base Goerli/Arb Sepolia |
+| 3 | Deploy to testnet | Verify on Base Sepolia (chain id 84532)/Arb Sepolia |
 | 4 | Verify contract source | Etherscan/Basescan verification |
 | 5 | Test verified contract | Interact via block explorer |
 | 6 | Deploy to mainnet | Use hardware wallet for deployer |
-| 7 | Transfer ownership | To multisig or governance |
+| 7 | Hand over admin roles | To multisig or governance |
 | 8 | Set up monitoring | Events, balance, anomalies |
 | 9 | Create emergency plan | Pause mechanisms, contact info |
 | 10 | Document deployment | Contract addresses, ABIs, notes |

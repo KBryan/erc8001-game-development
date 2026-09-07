@@ -22,13 +22,13 @@ The following contract implements a basic Ponzi mechanism:
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 /**
  * @title SimplePonzi
  * @notice EDUCATIONAL PURPOSES ONLY - DO NOT DEPLOY WITH REAL VALUE
  * @dev A minimal Ponzi scheme implementation demonstrating the pattern
- * 
+ *
  * WARNING: This contract is mathematically guaranteed to collapse.
  * Early investors are paid from later investors' deposits.
  * The last investors will lose all their money.
@@ -38,7 +38,7 @@ contract SimplePonzi {
     error InsufficientInvestment();
     error PayoutFailed(address recipient, uint256 amount);
     error NoPreviousInvestor();
-    
+
     // ============ Events ============
     event Invested(
         address indexed investor,
@@ -50,33 +50,33 @@ contract SimplePonzi {
         address indexed recipient,
         uint256 amount
     );
-    
+
     // ============ State Variables ============
     /// @notice The current highest bidder (most recent investor)
     address public currentWinner;
-    
+
     /// @notice The current investment amount required
     uint256 public highestBid;
-    
+
     /// @notice Previous investor who receives the payout
     address public previousInvestor;
-    
+
     /// @notice Amount previous investor paid (for ROI calculation)
     uint256 public previousInvestment;
-    
+
     /// @notice Total ETH invested in the contract
     uint256 public totalInvested;
-    
+
     /// @notice Number of investors
     uint256 public investorCount;
-    
+
     /// @notice Minimum initial investment
     uint256 public constant MIN_INITIAL_INVESTMENT = 0.01 ether;
-    
-    /// @notice Multiplier for next required investment (110
-    uint256 public constant MULTIPLIER_BPS = 11000; // 10000 = 100
+
+    /// @notice Multiplier for next required investment (110% of previous)
+    uint256 public constant MULTIPLIER_BPS = 11000; // 10000 = 100%
     uint256 public constant BPS_DENOMINATOR = 10000;
-    
+
     // ============ Modifiers ============
     modifier validInvestment() {
         if (msg.value < _getMinimumInvestment()) {
@@ -84,45 +84,45 @@ contract SimplePonzi {
         }
         _;
     }
-    
+
     // ============ External Functions ============
-    
+
     /**
      * @notice Invest ETH to become the current winner
-     * @dev The previous investor receives 110
+     * @dev The previous investor receives 110% of their investment
      */
     function invest() external payable validInvestment {
         address newInvestor = msg.sender;
         uint256 amount = msg.value;
-        
-        // If there's a previous investor, pay them
-        if (previousInvestor != address(0)) {
-            uint256 payout = previousInvestment * MULTIPLIER_BPS / BPS_DENOMINATOR;
-            
-            // Send payout to previous investor
-            (bool success, ) = payable(previousInvestor).call{value: payout}("");
+
+        // Pay the investor being replaced 110% of their investment,
+        // funded by the new deposit -- the Ponzi mechanism
+        if (currentWinner != address(0)) {
+            uint256 payout = highestBid * MULTIPLIER_BPS / BPS_DENOMINATOR;
+
+            (bool success, ) = payable(currentWinner).call{value: payout}("");
             if (!success) {
-                revert PayoutFailed(previousInvestor, payout);
+                revert PayoutFailed(currentWinner, payout);
             }
-            
-            emit PayoutSent(previousInvestor, payout);
+
+            emit PayoutSent(currentWinner, payout);
         }
-        
+
         // Update state
         previousInvestor = currentWinner;
         previousInvestment = highestBid;
         currentWinner = newInvestor;
         highestBid = amount;
-        
+
         unchecked {
             totalInvested += amount;
             investorCount++;
         }
-        
+
         uint256 nextPayout = amount * MULTIPLIER_BPS / BPS_DENOMINATOR;
         emit Invested(newInvestor, previousInvestor, amount, nextPayout);
     }
-    
+
     /**
      * @notice Get the minimum investment required for the next investor
      * @return minimum The minimum ETH required
@@ -130,7 +130,7 @@ contract SimplePonzi {
     function getMinimumInvestment() external view returns (uint256 minimum) {
         return _getMinimumInvestment();
     }
-    
+
     /**
      * @notice Calculate potential return on investment
      * @param amount The investment amount
@@ -139,7 +139,7 @@ contract SimplePonzi {
     function calculateROI(uint256 amount) external pure returns (uint256 payout) {
         return amount * MULTIPLIER_BPS / BPS_DENOMINATOR;
     }
-    
+
     /**
      * @notice Get the current contract state summary
      */
@@ -158,25 +158,25 @@ contract SimplePonzi {
             investorCount
         );
     }
-    
+
     // ============ Internal Functions ============
-    
+
     function _getMinimumInvestment() internal view returns (uint256) {
         if (highestBid == 0) {
             return MIN_INITIAL_INVESTMENT;
         }
         return highestBid * MULTIPLIER_BPS / BPS_DENOMINATOR;
     }
-    
+
     // ============ Receive ============
-    
+
     receive() external payable {
         revert("Use invest() function");
     }
 }
 ```
 
-*SimplePonzi contract (232 lines)*
+*SimplePonzi contract*
 
 <a id="lst:simple-ponzi"></a>
 
@@ -184,21 +184,19 @@ contract SimplePonzi {
 
 The contract demonstrates the Ponzi mechanism clearly:
 
-1. **Investment requirement**: Each new investor must pay 110\% of the previous investment
-2. **Immediate payout**: The previous investor receives their payout from the new deposit
+1. **Investment requirement**: Each new investor must pay 110% of the previous investment
+2. **Immediate payout**: The investor being replaced receives 110% of their investment, funded directly by the new deposit
 3. **Sustainability**: Requires infinite exponential growth to pay all investors
 
-| cccc@{}}
-
-**Round** | **Investment** | **Payout** | **New Capital Required** |
+| **Round** | **Investment** | **Payout** | **New Capital Required** |
 |---|---|---|---|
 | 1 | 0.01 ETH | -- | 0.011 ETH |
-| 10 | 0.026 ETH | 0.024 ETH | 0.028 ETH |
-| 50 | 1.24 ETH | 1.13 ETH | 1.36 ETH |
-| 100 | 162 ETH | 147 ETH | 178 ETH |
-| 150 | 21,192 ETH | 19,265 ETH | 23,311 ETH |
+| 10 | 0.024 ETH | 0.024 ETH | 0.026 ETH |
+| 50 | 1.07 ETH | 1.07 ETH | 1.17 ETH |
+| 100 | 125.3 ETH | 125.3 ETH | 137.8 ETH |
+| 150 | 14,707 ETH | 14,707 ETH | 16,178 ETH |
 
-By round 150, the scheme requires over 21,000 ETH just to pay the previous investor---an amount that becomes impossible to sustain.
+By round 150, the scheme requires over 14,700 ETH just to pay the previous investor---an amount that becomes impossible to sustain.
 
 ## The Pyramid Pattern
 
@@ -211,13 +209,13 @@ Pyramid schemes reward participants for recruiting new members, creating a hiera
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 /**
  * @title SimplePyramid
  * @notice EDUCATIONAL PURPOSES ONLY - DO NOT DEPLOY WITH REAL VALUE
  * @dev A minimal pyramid scheme implementation demonstrating the pattern
- * 
+ *
  * WARNING: This contract requires exponential recruitment to sustain.
  * Participants at the bottom of the pyramid will lose their investment.
  */
@@ -229,7 +227,7 @@ contract SimplePyramid {
     error ParentNotParticipating();
     error PyramidCollapsed();
     error TransferFailed();
-    
+
     // ============ Events ============
     event Joined(
         address indexed participant,
@@ -244,7 +242,7 @@ contract SimplePyramid {
         uint8 tier
     );
     event PayoutSent(address indexed recipient, uint256 amount);
-    
+
     // ============ Structs ============
     struct Participant {
         address parent;
@@ -254,37 +252,40 @@ contract SimplePyramid {
         uint8 level;
         bool exists;
     }
-    
+
     // ============ State Variables ============
     /// @notice Minimum entry fee
     uint256 public constant ENTRY_FEE = 0.1 ether;
-    
+
     /// @notice Maximum depth for commission payouts
     uint8 public constant MAX_DEPTH = 5;
-    
+
     /// @notice Commission percentages for each level (in basis points)
     uint16[MAX_DEPTH] public commissionRates = [2000, 1500, 1000, 500, 200];
-    // 20
-    
+    // 20%, 15%, 10%, 5%, 2%
+
     /// @notice Participant data
     mapping(address => Participant) public participants;
-    
+
     /// @notice Total participants
     uint256 public totalParticipants;
-    
+
     /// @notice Total ETH distributed
     uint256 public totalDistributed;
-    
+
+    /// @notice Total ETH paid to the creator as leftover fees from join()
+    uint256 public creatorFees;
+
     /// @notice Contract creator (receives remaining fees)
     address public immutable creator;
-    
+
     /// @notice Maximum participants before collapse risk
     uint256 public constant MAX_PARTICIPANTS = 10000;
-    
+
     // ============ Constructor ============
     constructor() {
         creator = msg.sender;
-        
+
         // Creator is first participant at level 0
         participants[creator] = Participant({
             parent: address(0),
@@ -294,12 +295,12 @@ contract SimplePyramid {
             level: 0,
             exists: true
         });
-        
+
         totalParticipants = 1;
     }
-    
+
     // ============ External Functions ============
-    
+
     /**
      * @notice Join the pyramid by paying entry fee
      * @param parent The address who referred you
@@ -317,34 +318,35 @@ contract SimplePyramid {
         if (totalParticipants >= MAX_PARTICIPANTS) {
             revert PyramidCollapsed();
         }
-        
+
         address current = parent;
         uint256 remainingFee = msg.value;
-        
+
         // Pay commissions up the chain
         for (uint8 i = 0; i < MAX_DEPTH; i++) {
             if (current == address(0)) break;
-            
+
             uint256 commission = msg.value * commissionRates[i] / 10000;
             if (commission > 0 && commission <= remainingFee) {
                 (bool success, ) = payable(current).call{value: commission}("");
                 if (!success) revert TransferFailed();
-                
+
                 participants[current].totalEarned += commission;
                 remainingFee -= commission;
-                
+
                 emit CommissionPaid(current, msg.sender, commission, i + 1);
             }
-            
+
             current = participants[current].parent;
         }
-        
+
         // Creator gets remainder
         if (remainingFee > 0) {
+            creatorFees += remainingFee;
             (bool success, ) = payable(creator).call{value: remainingFee}("");
             if (!success) revert TransferFailed();
         }
-        
+
         // Record new participant
         uint8 newLevel = participants[parent].level + 1;
         participants[msg.sender] = Participant({
@@ -355,24 +357,24 @@ contract SimplePyramid {
             level: newLevel,
             exists: true
         });
-        
+
         unchecked {
             participants[parent].referrals++;
             totalParticipants++;
         }
-        
+
         totalDistributed += msg.value - remainingFee;
-        
+
         emit Joined(msg.sender, parent, msg.value, newLevel);
     }
-    
+
     /**
      * @notice Get participant details
      */
     function getParticipant(address user) external view returns (Participant memory) {
         return participants[user];
     }
-    
+
     /**
      * @notice Calculate potential earnings from referrals
      */
@@ -386,11 +388,11 @@ contract SimplePyramid {
             for (uint8 i = 1; i < level; i++) {
                 peopleAtLevel *= avgReferralsPerPerson;
             }
-            
+
             totalEarnings += peopleAtLevel * ENTRY_FEE * commissionRates[level - 1] / 10000;
         }
     }
-    
+
     /**
      * @notice Check if pyramid is sustainable
      */
@@ -404,22 +406,25 @@ contract SimplePyramid {
         }
         return requiredForCurrent < MAX_PARTICIPANTS;
     }
-    
+
     /**
      * @notice Get contract statistics
+     * @return participantCount Total participants including the creator
+     * @return distributed Total ETH paid out as commissions
+     * @return creatorEarnings ETH paid to the creator by this scheme
+     *         (tracked via the creatorFees accumulator -- the creator's
+     *         wallet balance would include unrelated funds)
      */
     function getStats() external view returns (
-        uint256 participants,
+        uint256 participantCount,
         uint256 distributed,
-        uint256 creatorEarnings,
-        uint256 avgLevel
+        uint256 creatorEarnings
     ) {
-        participants = totalParticipants;
+        participantCount = totalParticipants;
         distributed = totalDistributed;
-        creatorEarnings = address(creator).balance;
-        // avgLevel calculation omitted for brevity
+        creatorEarnings = creatorFees;
     }
-    
+
     // ============ Receive ============
     receive() external payable {
         revert("Use join() function");
@@ -427,7 +432,7 @@ contract SimplePyramid {
 }
 ```
 
-*SimplePyramid contract (267 lines)*
+*SimplePyramid contract*
 
 <a id="lst:simple-pyramid"></a>
 
@@ -435,9 +440,7 @@ contract SimplePyramid {
 
 The pyramid structure requires each participant to recruit multiple others:
 
-| ccc@{}}
-
-**Level** | **People Required** | **Cumulative** |
+| **Level** | **People Required** | **Cumulative** |
 |---|---|---|
 | 0 (Creator) | 1 | 1 |
 | 1 | 3 | 4 |
@@ -474,7 +477,7 @@ Studying these patterns helps developers:
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
 import "../src/SimplePonzi.sol";
@@ -488,6 +491,10 @@ contract PonziPyramidTest is Test {
     address public bob = address(2);
     address public carol = address(3);
     
+    // The test contract deploys the pyramid, making it the creator that
+    // receives commissions -- it must be able to accept ETH
+    receive() external payable {}
+
     function setUp() public {
         ponzi = new SimplePonzi();
         pyramid = new SimplePyramid();
@@ -508,7 +515,7 @@ contract PonziPyramidTest is Test {
         vm.prank(bob);
         ponzi.invest{value: 0.011 ether}();
         
-        // Alice should receive 110
+        // Alice should receive 110% of her investment
         assertEq(alice.balance - aliceBalanceBefore, 0.011 ether);
     }
     

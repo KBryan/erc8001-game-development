@@ -10,7 +10,7 @@ In 2018, the landscape was dominated by:
 - Early Ponzi and pyramid schemes masquerading as games
 - Limited tooling requiring developers to work with primitive frameworks
 
-Today, in 2024, we witness:
+Today, in 2026, we witness:
 - Sophisticated on-chain games with complex state management
 - Layer-2 solutions enabling sub-cent transaction costs
 - Professional development frameworks like Foundry with advanced testing capabilities
@@ -19,13 +19,11 @@ Today, in 2024, we witness:
 
 ## 2018 vs 2026: A Comparative Overview
 
-The technological landscape has shifted dramatically. Table [Reference](#tab:comparison) summarizes the key differences between the 2018 and 2026 editions.
+The technological landscape has shifted dramatically. The comparison table below summarizes the key differences between the 2018 and 2026 editions.
 
-| p{3.5cm}p{4cm}p{4cm}@{}}
-
-**Feature** | **2018 Edition** | **2024 Edition** |
+**Feature** | **2018 Edition** | **2026 Edition** |
 |---|---|---|
-| Solidity Version | 0.4.15--0.4.25 | 0.8.19+ |
+| Solidity Version | 0.4.15--0.4.25 | 0.8.26 |
 | Development Framework | Truffle Suite | Foundry |
 | Testing Framework | JavaScript/Truffle | Solidity/Foundry |
 | Primary Network | Ethereum Mainnet | L2 (Base, Arbitrum, Optimism) |
@@ -60,8 +58,6 @@ Foundry represents a paradigm shift in Ethereum development. Unlike Truffle, whi
 This book employs a modern, cohesive technology stack designed for production-grade smart contract development.
 
 ### Core Development Tools
-
-> **Figure**: Figure
 
 #### Forge
 The primary build tool and testing framework. Forge compiles, tests, and deploys smart contracts with minimal configuration.
@@ -146,7 +142,7 @@ Before proceeding, ensure you have the following installed:
 ```bash
 
 # Verify installation
-forge --version  # Should show 0.2.x or higher
+forge --version  # Foundry 1.x (this book was built against 1.8)
 cast --version
 anvil --version
 ```

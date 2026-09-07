@@ -1,0 +1,818 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {AgentCoordination} from "./AgentCoordination.sol";
+import {Status, AgentIntent, AcceptanceAttestation, CoordinationPayload} from "./IAgentCoordination.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+/**
+ * @title GameCoordination
+ * @notice ERC-8001 extension for multiplayer game coordination
+ * @dev Enables signed intents for game lobbies, tournaments, and team actions
+ * 
+ * ERC-8001 OVERVIEW:
+ * - AgentIntent: Proposes coordination signed by agent (EIP-712 typed data)
+ * - AcceptanceAttestation: Each participant accepts with their signature
+ * - CoordinationPayload: The actual execution data
+ * - Status: Proposed → Ready → Executed → Cancelled/Expired
+ */
+contract GameCoordination is AgentCoordination {
+    using SafeERC20 for IERC20;
+
+    // ============ Game-Specific Coordination Types ============
+
+    /// @notice Tournament coordination type
+    bytes32 public constant COORDINATION_TOURNAMENT = keccak256("TOURNAMENT");
+
+    /// @notice Team staking coordination type
+    bytes32 public constant COORDINATION_TEAM_STAKE = keccak256("TEAM_STAKE");
+
+    /// @notice Battle coordination type
+    bytes32 public constant COORDINATION_BATTLE = keccak256("BATTLE");
+
+    /// @notice Loot share coordination type
+    bytes32 public constant COORDINATION_LOOT_SHARE = keccak256("LOOT_SHARE");
+
+    /// @notice Game lobby coordination type
+    bytes32 public constant COORDINATION_LOBBY = keccak256("LOBBY");
+
+    /// @notice Loot box coordination type (wrapper-managed, see ERC8001LootBox)
+    bytes32 public constant COORDINATION_LOOT_BOX = keccak256("LOOT_BOX");
+
+    // ============ State Variables ============
+
+    /// @notice ERC-20 token used for game economics (entry fees, rewards)
+    address public immutable gameToken;
+
+    /// @notice Minimum entry fee to prevent spam (wei)
+    uint256 public constant MIN_ENTRY_FEE = 0.001 ether;
+
+    /// @notice Maximum participants in tournaments
+    /// @dev Aligned with the base coordination layer's MAX_PARTICIPANTS (32);
+    ///      a larger value would be unreachable because proposeCoordination
+    ///      caps every intent's participant list at that limit
+    uint256 public constant MAX_TOURNAMENT_PLAYERS = MAX_PARTICIPANTS;
+
+    // ============ Tournament State ============
+
+    /**
+     * @notice Tournament data structure
+     * @param intentHash Reference to the ERC-8001 coordination
+     * @param entryFee Amount each player must pay to enter
+     * @param prizePool Total collected from all participants
+     * @param winner Address of tournament winner (0x0 if not completed)
+     * @param completed Whether tournament has been finalized
+     */
+    struct Tournament {
+        bytes32 intentHash;
+        uint256 entryFee;
+        uint256 prizePool;
+        address winner;
+        bool completed;
+    }
+
+    /// @notice Tournament data by intent hash
+    mapping(bytes32 => Tournament) public tournaments;
+
+    /// @notice Track player entry into tournaments
+    mapping(bytes32 => mapping(address => bool)) public hasEnteredTournament;
+
+    // ============ Team Staking State ============
+
+    /**
+     * @notice Team stake data structure
+     * @param intentHash Reference to the ERC-8001 coordination
+     * @param totalStaked Total amount staked by all team members
+     * @param rewardShare Amount each member receives (for equal splits)
+     * @param active Whether stake is active and earning rewards
+     * @param rewardToken Token address for rewards (0x0 for ETH)
+     */
+    struct TeamStake {
+        bytes32 intentHash;
+        uint256 totalStaked;
+        uint256 rewardShare;
+        bool active;
+        address rewardToken;
+    }
+
+    /// @notice Team stake data by intent hash
+    mapping(bytes32 => TeamStake) public teamStakes;
+
+    /// @notice Individual contributions to team stakes
+    mapping(bytes32 => mapping(address => uint256)) public teamContributions;
+
+    /// @notice Reward tokens deposited for each team, awaiting distribution
+    mapping(bytes32 => uint256) public teamRewardPools;
+
+    /// @notice Reward shares whose transfer failed during distribution,
+    ///         claimable later via claimUnclaimedReward()
+    mapping(bytes32 => mapping(address => uint256)) public unclaimedRewards;
+
+    // ============ Battle State ============
+
+    /**
+     * @notice Battle data structure for PvP encounters
+     * @param intentHash Reference to the ERC-8001 coordination
+     * @param challenger Player who initiated the battle
+     * @param defender Player who accepted the challenge
+     * @param wager Amount at stake
+     * @param resolved Whether battle has been resolved
+     * @param winner Winner address (0x0 for draw/undecided)
+     */
+    struct Battle {
+        bytes32 intentHash;
+        address challenger;
+        address defender;
+        uint256 wager;
+        bool resolved;
+        address winner;
+    }
+
+    /// @notice Battle data by intent hash
+    mapping(bytes32 => Battle) public battles;
+
+    // ============ Loot Share State ============
+
+    /**
+     * @notice Loot distribution data structure
+     * @param intentHash Reference to the ERC-8001 coordination
+     * @param itemIds Array of item identifiers to distribute
+     * @param distributed Whether loot has been distributed
+     * @param distributionType Equal (0) or Proportional (1)
+     */
+    struct LootDistribution {
+        bytes32 intentHash;
+        bytes32[] itemIds;
+        bool distributed;
+        uint8 distributionType; // 0 = equal, 1 = proportional
+    }
+
+    /// @notice Loot distribution data by intent hash
+    mapping(bytes32 => LootDistribution) public lootDistributions;
+
+    /// @notice Items claimed by address per distribution
+    mapping(bytes32 => mapping(address => bool)) public hasClaimedLoot;
+
+    // ============ Events ============
+
+    /// @notice Emitted when tournament is created
+    event TournamentCreated(
+        bytes32 indexed intentHash, 
+        uint256 entryFee, 
+        uint256 playerCount,
+        uint256 totalPrize
+    );
+
+    /// @notice Emitted when tournament is completed
+    event TournamentCompleted(
+        bytes32 indexed intentHash, 
+        address indexed winner, 
+        uint256 prize
+    );
+
+    /// @notice Emitted when team stake is activated
+    event TeamStakeCreated(
+        bytes32 indexed intentHash, 
+        uint256 teamSize, 
+        uint256 totalAmount,
+        address rewardToken
+    );
+
+    /// @notice Emitted when team rewards are distributed
+    event TeamRewardsDistributed(
+        bytes32 indexed intentHash, 
+        uint256 totalRewards,
+        uint256 perMemberShare
+    );
+
+    /// @notice Emitted when battle is initiated
+    event BattleCreated(
+        bytes32 indexed intentHash,
+        address indexed challenger,
+        address indexed defender,
+        uint256 wager
+    );
+
+    /// @notice Emitted when battle is resolved
+    event BattleResolved(
+        bytes32 indexed intentHash,
+        address indexed winner,
+        uint256 prize
+    );
+
+    /// @notice Emitted when loot is distributed
+    event LootDistributed(
+        bytes32 indexed intentHash,
+        uint256 itemCount,
+        uint8 distributionType
+    );
+
+    /// @notice Emitted when a reward share could not be delivered and was
+    ///         credited to unclaimedRewards instead
+    event RewardShareUnclaimed(
+        bytes32 indexed intentHash,
+        address indexed member,
+        uint256 amount
+    );
+
+    /// @notice Emitted when a member pulls a previously unclaimed reward share
+    event UnclaimedRewardClaimed(
+        bytes32 indexed intentHash,
+        address indexed member,
+        uint256 amount
+    );
+
+    /// @notice Emitted when the proposer closes an executed team stake
+    event TeamStakeClosed(bytes32 indexed intentHash);
+
+    /// @notice Emitted when a member withdraws their team contribution
+    event TeamContributionWithdrawn(
+        bytes32 indexed intentHash,
+        address indexed member,
+        uint256 amount
+    );
+
+    // ============ Errors ============
+
+    error InvalidCoordinationType();
+    error TournamentAlreadyExists();
+    error TournamentNotFound();
+    error InvalidEntryFee();
+    error PlayerAlreadyEntered();
+    error TournamentFull();
+    error BattleNotFound();
+    error BattleAlreadyResolved();
+    error LootAlreadyDistributed();
+    error NotAuthorized();
+    error StakeNotFound();
+    error StakeNotActive();
+    error ContributionLocked();
+    error NothingToClaim();
+
+    // ============ Constructor ============
+
+    /**
+     * @notice Initialize GameCoordination with game token
+     * @param _gameToken ERC-20 token address for game economics
+     */
+    constructor(address _gameToken) {
+        gameToken = _gameToken;
+    }
+
+    // ============ ERC-8001 Execution Overrides ============
+
+    /**
+     * @notice Override _executeInternal to handle game-specific logic
+     * @dev Routes to appropriate handler based on coordination type
+     * @param intentHash The coordination intent hash
+     * @param payload Coordination payload with execution data
+     * @param executionData Additional game-specific parameters
+     * @param state Reference to coordination state
+     * @return success Whether execution succeeded
+     * @return result Execution result data (encoded return values)
+     */
+    function _executeInternal(
+        bytes32 intentHash,
+        CoordinationPayload calldata payload,
+        bytes calldata executionData,
+        CoordinationState storage state
+    ) internal virtual override returns (bool success, bytes memory result) {
+
+        // Route to appropriate game handler based on coordination type
+        if (payload.coordinationType == COORDINATION_TOURNAMENT) {
+            return _executeTournament(intentHash, payload, executionData, state);
+        } else if (payload.coordinationType == COORDINATION_TEAM_STAKE) {
+            return _executeTeamStake(intentHash, payload, executionData, state);
+        } else if (payload.coordinationType == COORDINATION_BATTLE) {
+            return _executeBattle(intentHash, payload, executionData, state);
+        } else if (payload.coordinationType == COORDINATION_LOOT_SHARE) {
+            return _executeLootShare(intentHash, payload, executionData, state);
+        } else if (payload.coordinationType == COORDINATION_LOBBY) {
+            return _executeLobby(intentHash, payload, executionData, state);
+        } else if (payload.coordinationType == COORDINATION_LOOT_BOX) {
+            // Wrapper-managed pattern: ERC8001LootBox escrows the fees and
+            // distributes items itself (via Pyth Entropy) after execution.
+            // The coordination layer only certifies unanimous agreement, so
+            // the executionData (the user randomness) is passed through
+            return (true, executionData);
+        }
+
+        // Unknown coordination type - revert
+        revert InvalidCoordinationType();
+    }
+
+    // ============ Tournament Execution ============
+
+    /**
+     * @notice Execute tournament coordination
+     * @dev Collects entry fees from all participants
+     * @param intentHash The coordination intent hash
+     * @param executionData Encoded (uint256 entryFee, uint256 maxPlayers)
+     * @param state Coordination state with participants
+     */
+    function _executeTournament(
+        bytes32 intentHash,
+        CoordinationPayload calldata, /* payload */
+        bytes calldata executionData,
+        CoordinationState storage state
+    ) internal returns (bool, bytes memory) {
+        // Prevent duplicate tournaments
+        if (tournaments[intentHash].intentHash != bytes32(0)) {
+            revert TournamentAlreadyExists();
+        }
+
+        // Decode tournament parameters
+        (uint256 entryFee, uint256 maxPlayers) = abi.decode(executionData, (uint256, uint256));
+
+        // Validate parameters
+        if (entryFee < MIN_ENTRY_FEE) revert InvalidEntryFee();
+        if (maxPlayers > MAX_TOURNAMENT_PLAYERS) revert TournamentFull();
+        if (state.participants.length > maxPlayers) revert TournamentFull();
+
+        // Calculate total prize pool
+        uint256 totalPrize = entryFee * state.participants.length;
+
+        // Collect entry fees from all participants using game token
+        for (uint256 i = 0; i < state.participants.length; i++) {
+            address participant = state.participants[i];
+
+            // Prevent double-entry
+            if (hasEnteredTournament[intentHash][participant]) {
+                revert PlayerAlreadyEntered();
+            }
+
+            // Transfer tokens from participant to this contract
+            // Note: Participants must approve this contract beforehand
+            IERC20(gameToken).safeTransferFrom(participant, address(this), entryFee);
+
+            hasEnteredTournament[intentHash][participant] = true;
+        }
+
+        // Store tournament data
+        tournaments[intentHash] = Tournament({
+            intentHash: intentHash,
+            entryFee: entryFee,
+            prizePool: totalPrize,
+            winner: address(0),
+            completed: false
+        });
+
+        emit TournamentCreated(
+            intentHash, 
+            entryFee, 
+            state.participants.length,
+            totalPrize
+        );
+
+        // Return total prize pool for off-chain tracking
+        return (true, abi.encode(totalPrize, state.participants.length));
+    }
+
+    /**
+     * @notice Complete tournament and distribute prize to winner
+     * @dev Only the coordination proposer (tournament organizer) may complete
+     * @param intentHash Tournament intent hash
+     * @param winnerAddress Address of tournament winner
+     */
+    function completeTournament(
+        bytes32 intentHash,
+        address winnerAddress
+    ) external nonReentrant {
+        Tournament storage tournament = tournaments[intentHash];
+
+        if (tournament.intentHash == bytes32(0)) revert TournamentNotFound();
+        if (tournament.completed) revert TournamentAlreadyExists();
+
+        // Only the organizer who proposed the coordination can name a winner
+        if (msg.sender != states[intentHash].proposer) revert NotAuthorized();
+
+        // Verify winner is a participant
+        (bool isParticipant, ) = _binarySearch(getParticipants(intentHash), winnerAddress);
+        if (!isParticipant) revert NotAuthorized();
+
+        // Mark as completed
+        tournament.winner = winnerAddress;
+        tournament.completed = true;
+
+        // Transfer prize pool to winner
+        IERC20(gameToken).safeTransfer(winnerAddress, tournament.prizePool);
+
+        emit TournamentCompleted(intentHash, winnerAddress, tournament.prizePool);
+    }
+
+    // ============ Team Stake Execution ============
+
+    /**
+     * @notice Execute team stake coordination
+     * @dev Activates staking for a team when all members accept
+     * @param intentHash The coordination intent hash
+     * @param executionData Encoded (address rewardToken, bool equalSplit)
+     * @param state Coordination state with participants
+     */
+    function _executeTeamStake(
+        bytes32 intentHash,
+        CoordinationPayload calldata, /* payload */
+        bytes calldata executionData,
+        CoordinationState storage state
+    ) internal returns (bool, bytes memory) {
+
+        // Decode parameters
+        (address rewardToken, bool equalSplit) = abi.decode(executionData, (address, bool));
+
+        // Calculate total staked from all contributions
+        uint256 totalStaked = 0;
+        for (uint256 i = 0; i < state.participants.length; i++) {
+            totalStaked += teamContributions[intentHash][state.participants[i]];
+        }
+
+        // Externally-escrowed team stake: when no member contributed through
+        // contributeToTeamStake(), the tokens live in a wrapper contract
+        // (see TeamStaking, which escrows member stakes itself). Certify the
+        // agreement without creating an internal stake record — execution is
+        // submitter-gated, so only the wrapper that proposed can reach here
+        if (totalStaked == 0) {
+            return (true, abi.encode(uint256(0), uint256(0)));
+        }
+
+        // Calculate reward share per member (for equal distribution)
+        uint256 rewardShare = equalSplit ? totalStaked / state.participants.length : 0;
+
+        // Store team stake data
+        teamStakes[intentHash] = TeamStake({
+            intentHash: intentHash,
+            totalStaked: totalStaked,
+            rewardShare: rewardShare,
+            active: true,
+            rewardToken: rewardToken
+        });
+
+        emit TeamStakeCreated(
+            intentHash,
+            state.participants.length,
+            totalStaked,
+            rewardToken
+        );
+
+        return (true, abi.encode(totalStaked, rewardShare));
+    }
+
+    /**
+     * @notice Record contribution to team stake before execution
+     * @dev Called by team members to commit their stake
+     * @param intentHash Team stake intent hash
+     * @param amount Amount to contribute
+     */
+    function contributeToTeamStake(bytes32 intentHash, uint256 amount) external nonReentrant {
+        // Transfer tokens from contributor
+        IERC20(gameToken).safeTransferFrom(msg.sender, address(this), amount);
+
+        teamContributions[intentHash][msg.sender] += amount;
+    }
+
+    /**
+     * @notice Withdraw the caller's team contribution once the coordination
+     *         can no longer use it
+     * @dev Contributions are refundable when the coordination is Cancelled or
+     *      Expired, was never proposed at all, or when the proposer has closed
+     *      the executed stake via closeTeamStake(). The contribution is zeroed
+     *      before the transfer (CEI)
+     * @param intentHash Team stake intent hash
+     */
+    function withdrawTeamContribution(bytes32 intentHash) external nonReentrant {
+        uint256 amount = teamContributions[intentHash][msg.sender];
+        if (amount == 0) revert NothingToClaim();
+
+        Status status = states[intentHash].status;
+        bool coordinationOver =
+            status == Status.None || status == Status.Cancelled || status == Status.Expired;
+        bool stakeClosed = status == Status.Executed && teamStakes[intentHash].intentHash != bytes32(0)
+            && !teamStakes[intentHash].active;
+
+        if (!coordinationOver && !stakeClosed) revert ContributionLocked();
+
+        teamContributions[intentHash][msg.sender] = 0;
+        IERC20(gameToken).safeTransfer(msg.sender, amount);
+
+        emit TeamContributionWithdrawn(intentHash, msg.sender, amount);
+    }
+
+    /**
+     * @notice Close an executed team stake, letting members withdraw their
+     *         contributions via withdrawTeamContribution()
+     * @dev Only the coordination proposer may close; irreversible
+     * @param intentHash Team stake intent hash
+     */
+    function closeTeamStake(bytes32 intentHash) external nonReentrant {
+        TeamStake storage stake = teamStakes[intentHash];
+
+        if (stake.intentHash == bytes32(0)) revert StakeNotFound();
+        if (!stake.active) revert StakeNotActive();
+        if (msg.sender != states[intentHash].proposer) revert NotAuthorized();
+
+        stake.active = false;
+
+        emit TeamStakeClosed(intentHash);
+    }
+
+    /**
+     * @notice Deposit reward tokens into a team's reward pool
+     * @dev Anyone may fund the pool; distribution draws only from deposits
+     * @param intentHash Team stake intent hash
+     * @param amount Amount of reward tokens to deposit
+     */
+    function depositTeamRewards(bytes32 intentHash, uint256 amount) external nonReentrant {
+        TeamStake storage stake = teamStakes[intentHash];
+
+        if (!stake.active) revert StakeNotActive();
+        if (amount == 0) revert InvalidEntryFee(); // Reusing error
+
+        IERC20(stake.rewardToken).safeTransferFrom(msg.sender, address(this), amount);
+
+        teamRewardPools[intentHash] += amount;
+    }
+
+    /**
+     * @notice Distribute the deposited reward pool to all team members
+     * @dev Only the coordination proposer may distribute; amount comes from
+     *      tracked deposits, never from a caller-supplied number. A share
+     *      whose transfer fails (blocklisted recipient, paused token) is
+     *      credited to unclaimedRewards instead of blocking the whole loop —
+     *      the member pulls it later via claimUnclaimedReward()
+     * @param intentHash Team stake intent hash
+     */
+    function distributeTeamRewards(bytes32 intentHash) external nonReentrant {
+        TeamStake storage stake = teamStakes[intentHash];
+
+        if (!stake.active) revert StakeNotActive();
+        if (msg.sender != states[intentHash].proposer) revert NotAuthorized();
+
+        uint256 totalRewards = teamRewardPools[intentHash];
+        if (totalRewards == 0) revert InvalidEntryFee(); // Reusing error
+
+        // Zero the pool before transfers
+        teamRewardPools[intentHash] = 0;
+
+        address[] memory participants = getParticipants(intentHash);
+        uint256 perMemberShare = totalRewards / participants.length;
+
+        for (uint256 i = 0; i < participants.length; i++) {
+            if (!IERC20(stake.rewardToken).trySafeTransfer(participants[i], perMemberShare)) {
+                unclaimedRewards[intentHash][participants[i]] += perMemberShare;
+                emit RewardShareUnclaimed(intentHash, participants[i], perMemberShare);
+            }
+        }
+
+        emit TeamRewardsDistributed(intentHash, totalRewards, perMemberShare);
+    }
+
+    /**
+     * @notice Pull a reward share that could not be delivered during
+     *         distributeTeamRewards()
+     * @param intentHash Team stake intent hash
+     */
+    function claimUnclaimedReward(bytes32 intentHash) external nonReentrant {
+        uint256 amount = unclaimedRewards[intentHash][msg.sender];
+        if (amount == 0) revert NothingToClaim();
+
+        unclaimedRewards[intentHash][msg.sender] = 0;
+        IERC20(teamStakes[intentHash].rewardToken).safeTransfer(msg.sender, amount);
+
+        emit UnclaimedRewardClaimed(intentHash, msg.sender, amount);
+    }
+
+    // ============ Battle Execution ============
+
+    /**
+     * @notice Execute battle coordination
+     * @dev Sets up PvP battle between challenger and defender
+     * @param intentHash The coordination intent hash
+     * @param executionData Encoded (address challenger, uint256 wager)
+     * @param state Coordination state (should have 2 participants)
+     */
+    function _executeBattle(
+        bytes32 intentHash,
+        CoordinationPayload calldata, /* payload */
+        bytes calldata executionData,
+        CoordinationState storage state
+    ) internal returns (bool, bytes memory) {
+
+        // Decode battle parameters
+        (address challenger, uint256 wager) = abi.decode(executionData, (address, uint256));
+
+        // Battles require exactly 2 participants
+        if (state.participants.length != 2) revert InvalidCoordinationType();
+
+        // Find defender (the other participant)
+        address defender = state.participants[0] == challenger 
+            ? state.participants[1] 
+            : state.participants[0];
+
+        // Collect wagers from both players
+        IERC20(gameToken).safeTransferFrom(challenger, address(this), wager);
+        IERC20(gameToken).safeTransferFrom(defender, address(this), wager);
+
+        // Store battle data
+        battles[intentHash] = Battle({
+            intentHash: intentHash,
+            challenger: challenger,
+            defender: defender,
+            wager: wager,
+            resolved: false,
+            winner: address(0)
+        });
+
+        emit BattleCreated(intentHash, challenger, defender, wager);
+
+        return (true, abi.encode(challenger, defender, wager * 2)); // Total prize
+    }
+
+    /**
+     * @notice Resolve battle with winner
+     * @dev Only the coordination proposer (battle arbiter) may resolve
+     * @param intentHash Battle intent hash
+     * @param winnerAddress Winner address (0x0 for draw - returns wagers)
+     */
+    function resolveBattle(
+        bytes32 intentHash,
+        address winnerAddress
+    ) external nonReentrant {
+        Battle storage battle = battles[intentHash];
+
+        if (battle.intentHash == bytes32(0)) revert BattleNotFound();
+        if (battle.resolved) revert BattleAlreadyResolved();
+
+        // Only the proposer who arranged the battle can resolve it
+        if (msg.sender != states[intentHash].proposer) revert NotAuthorized();
+
+        // Winner must be one of the two combatants (or 0x0 for a draw)
+        if (
+            winnerAddress != address(0) &&
+            winnerAddress != battle.challenger &&
+            winnerAddress != battle.defender
+        ) revert NotAuthorized();
+
+        battle.resolved = true;
+        battle.winner = winnerAddress;
+
+        uint256 totalPrize = battle.wager * 2;
+
+        if (winnerAddress == address(0)) {
+            // Draw - return wagers to both players
+            IERC20(gameToken).safeTransfer(battle.challenger, battle.wager);
+            IERC20(gameToken).safeTransfer(battle.defender, battle.wager);
+        } else {
+            // Winner takes all
+            IERC20(gameToken).safeTransfer(winnerAddress, totalPrize);
+        }
+
+        emit BattleResolved(intentHash, winnerAddress, totalPrize);
+    }
+
+    // ============ Loot Share Execution ============
+
+    /**
+     * @notice Execute loot share coordination
+     * @dev Sets up fair distribution of loot among participants
+     * @param intentHash The coordination intent hash
+     * @param executionData Encoded (bytes32[] itemIds, uint8 distributionType)
+     * @param state Coordination state with participants
+     */
+    function _executeLootShare(
+        bytes32 intentHash,
+        CoordinationPayload calldata, /* payload */
+        bytes calldata executionData,
+        CoordinationState storage state
+    ) internal returns (bool, bytes memory) {
+
+        // Decode loot parameters
+        (bytes32[] memory itemIds, uint8 distributionType) = abi.decode(
+            executionData, 
+            (bytes32[], uint8)
+        );
+
+        if (itemIds.length == 0) revert InvalidCoordinationType();
+        if (distributionType > 1) revert InvalidCoordinationType(); // 0 or 1 only
+
+        // Store loot distribution data
+        lootDistributions[intentHash] = LootDistribution({
+            intentHash: intentHash,
+            itemIds: itemIds,
+            distributed: false,
+            distributionType: distributionType
+        });
+
+        emit LootDistributed(intentHash, itemIds.length, distributionType);
+
+        return (true, abi.encode(itemIds.length, state.participants.length));
+    }
+
+    /**
+     * @notice Claim loot items for caller
+     * @param intentHash Loot distribution intent hash
+     * @param itemIndices Indices of items to claim
+     */
+    function claimLoot(
+        bytes32 intentHash, 
+        uint256[] calldata itemIndices
+    ) external nonReentrant returns (bytes32[] memory claimedItems) {
+        LootDistribution storage dist = lootDistributions[intentHash];
+
+        if (dist.distributed) revert LootAlreadyDistributed();
+        if (hasClaimedLoot[intentHash][msg.sender]) revert PlayerAlreadyEntered();
+
+        address[] memory participants = getParticipants(intentHash);
+
+        // Verify caller is participant
+        (bool isParticipant, uint256 participantIndex) = _binarySearch(participants, msg.sender);
+        if (!isParticipant) revert NotAuthorized();
+
+        claimedItems = new bytes32[](itemIndices.length);
+
+        if (dist.distributionType == 0) {
+            // Equal distribution - each participant gets same number of items
+            uint256 itemsPerPlayer = dist.itemIds.length / participants.length;
+            uint256 startIdx = participantIndex * itemsPerPlayer;
+
+            for (uint256 i = 0; i < itemIndices.length; i++) {
+                uint256 itemIdx = startIdx + itemIndices[i];
+                if (itemIdx >= startIdx + itemsPerPlayer) revert NotAuthorized();
+                claimedItems[i] = dist.itemIds[itemIdx];
+            }
+        } else {
+            // Proportional - could be based on contribution, random, etc.
+            // For simplicity, first-come-first-served within allowed indices
+            for (uint256 i = 0; i < itemIndices.length; i++) {
+                if (itemIndices[i] >= dist.itemIds.length) revert NotAuthorized();
+                claimedItems[i] = dist.itemIds[itemIndices[i]];
+            }
+        }
+
+        hasClaimedLoot[intentHash][msg.sender] = true;
+
+        return claimedItems;
+    }
+
+    // ============ Lobby Execution ============
+
+    /**
+     * @notice Execute lobby coordination
+     * @dev Simple lobby creation - returns immediately for off-chain game coordination
+     * @param executionData Encoded (uint256 gameMode, bytes32 mapId)
+     * @param state Coordination state with participants
+     */
+    function _executeLobby(
+        bytes32, /* intentHash */
+        CoordinationPayload calldata, /* payload */
+        bytes calldata executionData,
+        CoordinationState storage state
+    ) internal view returns (bool, bytes memory) {
+
+        // Decode lobby parameters (used off-chain)
+        (uint256 gameMode, bytes32 mapId) = abi.decode(executionData, (uint256, bytes32));
+
+        // Lobby is primarily an off-chain coordination signal
+        // Return data for game servers to use
+        return (true, abi.encode(gameMode, mapId, state.participants.length));
+    }
+
+    // ============ View Functions ============
+
+    /**
+     * @notice Get participants for a coordination
+     * @param intentHash Coordination intent hash
+     * @return participants Array of participant addresses
+     */
+    function getParticipants(bytes32 intentHash) public view returns (address[] memory participants) {
+        CoordinationState storage st = states[intentHash];
+        return st.participants;
+    }
+
+    /**
+     * @notice Check if tournament is active
+     * @param intentHash Tournament intent hash
+     * @return active True if tournament exists and not completed
+     */
+    function isTournamentActive(bytes32 intentHash) external view returns (bool active) {
+        Tournament storage t = tournaments[intentHash];
+        return t.intentHash != bytes32(0) && !t.completed;
+    }
+
+    /**
+     * @notice Get tournament details
+     * @param intentHash Tournament intent hash
+     * @return entryFee Entry fee per player
+     * @return prizePool Total prize pool
+     * @return playerCount Number of registered players
+     * @return completed Whether tournament is finished
+     */
+    function getTournamentDetails(bytes32 intentHash) external view returns (
+        uint256 entryFee,
+        uint256 prizePool,
+        uint256 playerCount,
+        bool completed
+    ) {
+        Tournament storage t = tournaments[intentHash];
+        return (t.entryFee, t.prizePool, getParticipants(intentHash).length, t.completed);
+    }
+}

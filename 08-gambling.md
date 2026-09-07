@@ -2,28 +2,30 @@
 
 ## Introduction
 
-Blockchain gambling games offer provably fair mechanics, transparent odds, and instant global accessibility. This chapter implements classic games with mathematical precision and proper house edge management.
+Blockchain gambling games can offer provably fair mechanics, transparent odds, and instant global accessibility---when built on a secure randomness source. This chapter implements classic games with mathematical precision and proper house edge management; note that the Roulette example deliberately uses insecure randomness as a teaching exercise.
+
+> **Legal disclaimer.** Operating an on-chain gambling service is illegal or licence-gated in most jurisdictions, regardless of how the contracts are deployed or who holds the keys. The contracts in this chapter are educational implementations for studying game mechanics, house edge mathematics, and security patterns---they are not products to deploy. Some of them (notably Roulette) are deliberately insecure teaching examples. You are responsible for knowing and complying with the law wherever you operate.
 
 ### House Edge Fundamentals
 
 The house edge ensures long-term sustainability while providing entertainment value:
 
-\begin{equation}
-\text{House Edge} = \frac{\text{Expected Value}}{\text{Wager Amount}} \times 100\%
-\end{equation}
+```
+House Edge = -(Expected Value / Wager Amount) × 100%
+```
 
-A 2\% house edge means players lose an average of 2\% per bet over the long run---comparable to or better than traditional casinos.
+Because the player's expected value is negative, the house edge comes out as a positive percentage---the share of each wager the house keeps on average. A 2% house edge means players lose an average of 2% per bet over the long run---comparable to or better than traditional casinos.
 
 ## SatoshiDice: Modernized
 
-SatoshiDice was the first Bitcoin gambling game. This Ethereum implementation uses commit-reveal for fairness.
+SatoshiDice was the first Bitcoin gambling game. This Ethereum implementation splits each bet into a place and a reveal step, but note that despite the `commitHash` name this is not a true commit-reveal scheme: the hash is derived entirely from public values (sender, block number, bet amount, target, timestamp) with no player-chosen secret, so it serves as a bet identifier rather than a cryptographic commitment. Fairness rests entirely on the unpredictability of a future blockhash---which a block proposer can influence---making this fine for teaching but a job for a VRF in production.
 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -49,7 +51,7 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
     
     uint256 public minBet = 0.001 ether;
     uint256 public maxBet = 1 ether;
-    uint256 public houseEdgeBps = 200; // 2
+    uint256 public houseEdgeBps = 200; // 2%
     uint256 public constant BPS_DENOMINATOR = 10000;
     uint256 public constant MAX_ROLL = 100;
     
@@ -74,13 +76,17 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
     );
     event FundsDeposited(address from, uint256 amount);
     event FundsWithdrawn(address to, uint256 amount);
-    
+
+    constructor() Ownable(msg.sender) {}
+
     /**
      * @notice Place a bet by committing a hash
-     * @param target Roll under this number (1-99) to win
+     * @param target Roll under this number (2-98) to win
      */
     function placeBet(uint8 target) external payable returns (bytes32 commitHash) {
-        require(target > 1 && target < MAX_ROLL, "Target must be 2-99");
+        // Target 99 is excluded: at 2% house edge its payout would exactly
+        // equal the bet, leaving no winning outcome for the player.
+        require(target > 1 && target < MAX_ROLL - 1, "Target must be 2-98");
         require(msg.value >= minBet && msg.value <= maxBet, "Invalid bet size");
         
         // Calculate payout based on probability
@@ -88,11 +94,13 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
         // Fair payout: bet * 100 / (target - 1)
         // With house edge: fair payout * (1 - houseEdge)
         
-        uint256 fairPayout = (msg.value * MAX_ROLL * BPS_DENOMINATOR) / 
-                           ((target - 1) * (BPS_DENOMINATOR - houseEdgeBps));
+        uint256 fairPayout = (msg.value * MAX_ROLL * (BPS_DENOMINATOR - houseEdgeBps)) /
+                           ((target - 1) * BPS_DENOMINATOR);
         
+        // address(this).balance already includes msg.value at this point,
+        // so the full payout must be covered without subtracting the bet.
         require(
-            address(this).balance >= fairPayout - msg.value,
+            address(this).balance >= fairPayout,
             "Insufficient contract balance"
         );
         
@@ -150,14 +158,16 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
             commitHash
         )));
         
-        uint8 result = uint8(randomness 
+        uint8 result = uint8(randomness % MAX_ROLL) + 1; // 1-100
         bet.result = result;
         bet.revealed = true;
         
         if (result < bet.target) {
             bet.won = true;
             totalPaid += bet.payout;
-            payable(bet.player).transfer(bet.payout);
+            // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+            (bool success, ) = payable(bet.player).call{value: bet.payout}("");
+            require(success, "Payout transfer failed");
         }
         
         emit BetRevealed(
@@ -177,8 +187,8 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
         view 
         returns (uint256) 
     {
-        return (betAmount * MAX_ROLL * BPS_DENOMINATOR) / 
-               ((target - 1) * (BPS_DENOMINATOR - houseEdgeBps));
+        return (betAmount * MAX_ROLL * (BPS_DENOMINATOR - houseEdgeBps)) /
+               ((target - 1) * BPS_DENOMINATOR);
     }
     
     /**
@@ -212,7 +222,8 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
      */
     function withdraw(uint256 amount) external onlyOwner {
         require(amount <= address(this).balance, "Insufficient balance");
-        payable(owner()).transfer(amount);
+        (bool success, ) = payable(owner()).call{value: amount}("");
+        require(success, "Withdraw transfer failed");
         emit FundsWithdrawn(owner(), amount);
     }
     
@@ -229,13 +240,13 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
     function getStats() external view returns (
         uint256 wagered,
         uint256 paid,
-        uint256 bets,
+        uint256 totalBets,
         uint256 balance,
         int256 profit
     ) {
         wagered = totalWagered;
         paid = totalPaid;
-        bets = betCount;
+        totalBets = betCount;
         balance = address(this).balance;
         profit = int256(wagered) - int256(paid);
     }
@@ -248,31 +259,36 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
 
 ### SatoshiDice Mathematics
 
-| ccccc@{}}
-
-**Target** | **Win Prob** | **Multiplier** | **House Edge** | **RTP** |
+| **Target** | **Win Prob** | **Multiplier** | **House Edge** | **RTP** |
 |---|---|---|---|---|
-| 10 | 9\% | 10.89x | 2.0\% | 98.0\% |
-| 25 | 24\% | 4.08x | 2.0\% | 98.0\% |
-| 50 | 49\% | 2.04x | 2.0\% | 98.0\% |
-| 75 | 74\% | 1.35x | 2.0\% | 98.0\% |
-| 90 | 89\% | 1.12x | 2.0\% | 98.0\% |
+| 10 | 9% | 10.89x | 2.0% | 98.0% |
+| 25 | 24% | 4.08x | 2.0% | 98.0% |
+| 50 | 49% | 2.00x | 2.0% | 98.0% |
+| 75 | 74% | 1.32x | 2.0% | 98.0% |
+| 90 | 89% | 1.10x | 2.0% | 98.0% |
 
 ## Roulette: Multi-Bet Type
 
-European roulette with single zero, supporting multiple bet types.
+European roulette with single zero, supporting multiple bet types. This contract is an insecure teaching example: its spin result is precomputable in the same transaction (see the warning blocks below), so it must never be deployed with real funds.
 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title Roulette
  * @notice European roulette with 6 bet types
+ * @dev WARNING: INSECURE RANDOMNESS - educational only, do not deploy with
+ *      real funds. The spin result is derived from blockhash(block.number - 1),
+ *      msg.sender, and block.timestamp in the same transaction that places the
+ *      bet, so every input is known before the transaction executes. An
+ *      attacker contract can precompute the outcome and submit a straight-up
+ *      35:1 bet only when it is guaranteed to win. A production casino must
+ *      use a verifiable randomness source such as Chainlink VRF.
  */
 contract Roulette is ReentrancyGuard, Ownable {
     
@@ -315,7 +331,7 @@ contract Roulette is ReentrancyGuard, Ownable {
     
     uint256 public minBet = 0.001 ether;
     uint256 public maxTotalBet = 10 ether;
-    uint256 public houseEdgeBps = 270; // 2.7
+    uint256 public houseEdgeBps = 270; // 2.7% (single zero advantage)
     
     uint256 public totalWagered;
     uint256 public totalPaid;
@@ -329,7 +345,7 @@ contract Roulette is ReentrancyGuard, Ownable {
         bool isRed
     );
     
-    constructor() {
+    constructor() Ownable(msg.sender) {
         // Initialize red numbers
         uint8[18] memory reds = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36];
         for (uint256 i = 0; i < reds.length; i++) {
@@ -379,13 +395,15 @@ contract Roulette is ReentrancyGuard, Ownable {
             newSpin.bets.push(bets[i]);
         }
         
+        totalWagered += totalBet;
+
         // Pay out
         if (payout > 0) {
             totalPaid += payout;
-            payable(msg.sender).transfer(payout);
+            // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+            (bool success, ) = payable(msg.sender).call{value: payout}("");
+            require(success, "Payout transfer failed");
         }
-        
-        totalWagered += totalBet;
         
         emit SpinPlaced(msg.sender, spinId, totalBet);
         emit SpinResult(msg.sender, spinId, result, payout, isRed[result]);
@@ -411,19 +429,27 @@ contract Roulette is ReentrancyGuard, Ownable {
     /**
      * @notice Get house edge for bet type
      */
-    function getHouseEdge(BetType betType) external pure returns (uint256 bps) {
-        // European roulette: 2.7
+    function getHouseEdge(BetType /* betType */) external pure returns (uint256 bps) {
+        // European roulette: 2.7% house edge on all bets
         // (1/37 = 0.027)
         return 270;
     }
     
+    /**
+     * @dev WARNING: INSECURE RANDOMNESS - educational only, do not deploy
+     *      with real funds. blockhash(block.number - 1), msg.sender, and
+     *      block.timestamp are all readable before this transaction runs, so
+     *      a contract can compute the result off-chain (or in the same
+     *      transaction) and bet only on guaranteed wins. Production must use
+     *      a VRF.
+     */
     function _generateResult() internal view returns (uint8) {
         return uint8(
             uint256(keccak256(abi.encodePacked(
                 blockhash(block.number - 1),
                 msg.sender,
                 block.timestamp
-            ))) 
+            ))) % 37
         ); // 0-36
     }
     
@@ -454,10 +480,10 @@ contract Roulette is ReentrancyGuard, Ownable {
         return true;
     }
     
-    function _calculatePayout(Bet[] calldata bets, uint8 result) 
-        internal 
-        pure 
-        returns (uint256 totalPayout) 
+    function _calculatePayout(Bet[] calldata bets, uint8 result)
+        internal
+        view
+        returns (uint256 totalPayout)
     {
         for (uint256 i = 0; i < bets.length; i++) {
             if (_isWinningBet(bets[i], result)) {
@@ -482,7 +508,7 @@ contract Roulette is ReentrancyGuard, Ownable {
             if (result == 0) return false;
             // numbers[0]: 0 = even, 1 = odd
             bool betEven = bet.numbers[0] == 0;
-            bool resultEven = result 
+            bool resultEven = result % 2 == 0;
             return betEven == resultEven;
         }
         
@@ -507,7 +533,7 @@ contract Roulette is ReentrancyGuard, Ownable {
         
         if (bet.betType == BetType.Column) {
             uint8 col = bet.numbers[0]; // 0, 1, 2
-            return result > 0 && (result - 1) 
+            return result > 0 && (result - 1) % 3 == col;
         }
         
         return false;
@@ -523,19 +549,17 @@ contract Roulette is ReentrancyGuard, Ownable {
 
 ### Roulette Mathematics
 
-European roulette with single zero has a consistent 2.7\% house edge:
+European roulette with single zero has a consistent 2.7% house edge:
 
-| lccc@{}}
-
-**Bet Type** | **Numbers Covered** | **Payout** | **Probability** |
+| **Bet Type** | **Numbers Covered** | **Payout** | **Probability** |
 |---|---|---|---|
-| Straight | 1 | 35:1 | 2.7\% |
-| Split | 2 | 17:1 | 5.4\% |
-| Street | 3 | 11:1 | 8.1\% |
-| Corner | 4 | 8:1 | 10.8\% |
-| Six Line | 6 | 5:1 | 16.2\% |
-| Dozen/Column | 12 | 2:1 | 32.4\% |
-| Even/Odd/Red/Black/High/Low | 18 | 1:1 | 48.6\% |
+| Straight | 1 | 35:1 | 2.7% |
+| Split | 2 | 17:1 | 5.4% |
+| Street | 3 | 11:1 | 8.1% |
+| Corner | 4 | 8:1 | 10.8% |
+| Six Line | 6 | 5:1 | 16.2% |
+| Dozen/Column | 12 | 2:1 | 32.4% |
+| Even/Odd/Red/Black/High/Low | 18 | 1:1 | 48.6% |
 
 ## House Edge Calculations
 
@@ -543,9 +567,9 @@ European roulette with single zero has a consistent 2.7\% house edge:
 
 For any bet, the expected value is:
 
-\begin{equation}
-EV = (P_{win} \times W) - (P_{loss} \times B)
-\end{equation}
+```
+EV = (P_win × W) - (P_loss × B)
+```
 
 Where:
 - $P_{win}$ = Probability of winning
@@ -557,9 +581,9 @@ Where:
 
 For bankroll management, the risk of ruin formula:
 
-\begin{equation}
-RoR = \left(\frac{q}{p}\right)^n
-\end{equation}
+```
+RoR = (q / p)^n
+```
 
 Where:
 - $p$ = Probability of winning
@@ -570,9 +594,9 @@ Where:
 
 Optimal bet sizing:
 
-\begin{equation}
-f^* = \frac{bp - q}{b}
-\end{equation}
+```
+f* = (bp - q) / b
+```
 
 Where:
 - $f^*$ = Fraction of bankroll to bet
@@ -582,13 +606,17 @@ Where:
 
 ## Responsible Gaming Features
 
+Limits only protect players if they are actually enforced before a wager is accepted: the modifier below checks the player's own daily wager limit and loss limit (both self-set) alongside the global cap, and game contracts report losing bets back through `_recordLoss` so the loss accounting stays current.
+
 ```solidity
 
 abstract contract ResponsibleGaming {
     
     mapping(address => uint256) public dailyWagered;
+    mapping(address => uint256) public dailyLosses;
     mapping(address => uint256) public lastWagerReset;
-    mapping(address => uint256) public lossLimit;
+    mapping(address => uint256) public dailyLimit; // Per-player wager cap (0 = unset)
+    mapping(address => uint256) public lossLimit;  // Per-player loss cap (0 = unset)
     mapping(address => bool) public selfExcluded;
     
     uint256 public globalDailyLimit = 100 ether;
@@ -597,24 +625,51 @@ abstract contract ResponsibleGaming {
     modifier responsibleGaming(address player, uint256 amount) {
         require(!selfExcluded[player], "Self-excluded");
         
-        // Reset daily counter if needed
+        // Reset daily counters if needed
         if (block.timestamp > lastWagerReset[player] + 1 days) {
             dailyWagered[player] = 0;
+            dailyLosses[player] = 0;
             lastWagerReset[player] = block.timestamp;
         }
         
+        // The player's own daily limit applies if they set one;
+        // the global cap always applies
+        if (dailyLimit[player] > 0) {
+            require(
+                dailyWagered[player] + amount <= dailyLimit[player],
+                "Player daily limit exceeded"
+            );
+        }
         require(
             dailyWagered[player] + amount <= globalDailyLimit,
             "Daily limit exceeded"
         );
         
-        _;
+        // A wager risks losing its full amount: refuse it if that
+        // would breach the player's self-set loss limit
+        if (lossLimit[player] > 0) {
+            require(
+                dailyLosses[player] + amount <= lossLimit[player],
+                "Loss limit exceeded"
+            );
+        }
         
         dailyWagered[player] += amount;
+        
+        _;
+    }
+    
+    /// @dev Child contracts call this when a settled bet loses
+    function _recordLoss(address player, uint256 amount) internal {
+        dailyLosses[player] += amount;
     }
     
     function selfExclude() external {
         selfExcluded[msg.sender] = true;
+    }
+    
+    function setDailyLimit(uint256 limit) external {
+        dailyLimit[msg.sender] = limit;
     }
     
     function setLossLimit(uint256 limit) external {

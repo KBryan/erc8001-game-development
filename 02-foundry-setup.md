@@ -8,8 +8,6 @@ Foundry is a blazing fast, portable, and modular toolkit for Ethereum applicatio
 
 The transition from Truffle to Foundry is not merely incremental---it's transformational:
 
-| p{4cm}p{5cm}p{5cm}@{}}
-
 **Aspect** | **Truffle** | **Foundry** |
 |---|---|---|
 | Test Language | JavaScript | Solidity |
@@ -82,19 +80,28 @@ src = "src"
 test = "test"
 script = "script"
 libs = ["lib"]
-solc = "0.8.19"
+solc = "0.8.26"
+# The optimizer is off by default in Foundry; without it GameCoordination
+# exceeds the EIP-170 24,576-byte runtime limit.
 optimizer = true
 optimizer_runs = 200
+# Cancun is supported on every chain the book targets (mainnet, Base,
+# Arbitrum, Optimism) and is required by OpenZeppelin v5's cryptography
+# libraries, which use the mcopy opcode. Sources are unified at ^0.8.26.
+evm_version = "cancun"
+verbosity = 3
 
 # Gas reporting
 gas_reports = ["*"]
-gas_reports_ignore = []
 
-# Testing
-fuzz_runs = 1000
-fuzz_max_local_rejects = 1024
-fuzz_max_global_rejects = 65536
-verbosity = 3
+# Fuzz testing
+[fuzz]
+runs = 1000
+
+# Invariant testing
+[invariant]
+runs = 128
+depth = 15
 
 # Etherscan verification
 [etherscan]
@@ -110,6 +117,8 @@ arbitrum = "${ARBITRUM_RPC_URL}"
 ```
 
 *Production-ready foundry.toml configuration*
+
+Two settings deserve special attention. Foundry ships with the optimizer *disabled* by default, and EIP-170 caps deployed runtime bytecode at 24,576 bytes---larger contracts such as this book's `GameCoordination` simply will not deploy without optimization. Setting `evm_version = "cancun"` matters because OpenZeppelin v5's cryptography libraries emit the `mcopy` opcode, which pre-Cancun chains do not understand.
 
 <a id="lst:foundry-config"></a>
 
@@ -145,7 +154,7 @@ Foundry tests are written in Solidity, eliminating language context switching:
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
 import "../src/SimplePonzi.sol";
@@ -228,8 +237,6 @@ function testFuzz_Invest(uint256 amount) public {
 ### Cheat Codes
 
 Cheat codes enable powerful testing capabilities:
-
-| p{5cm}p{8cm}@{}}
 
 **Cheat Code** | **Description** |
 |---|---|
@@ -332,7 +339,7 @@ Foundry uses git submodules for dependency management:
 forge install OpenZeppelin/openzeppelin-contracts
 
 # Install specific version
-forge install OpenZeppelin/openzeppelin-contracts@v4.9.3
+forge install OpenZeppelin/openzeppelin-contracts@v5.7.0
 
 # Update dependencies
 forge update
@@ -342,6 +349,8 @@ forge remove openzeppelin-contracts
 ```
 
 *Dependency management with Forge*
+
+> **Version note**: This book pins OpenZeppelin v5. If you maintain an older v4 codebase, note the reverse mapping: v4 kept `ReentrancyGuard` and `Pausable` under `contracts/security/` (v5 moved them to `contracts/utils/`), and v4's `Ownable` constructor took no arguments (v5 requires an `initialOwner`). Readers on v4 must adjust imports and constructors accordingly.
 
 Remappings in `foundry.toml` map imports to installed dependencies:
 
@@ -359,7 +368,7 @@ remappings = [
 
 ## Best Practices
 
-1. **Always use specific Solidity versions**: Pin `pragma solidity 0.8.19;` for reproducibility.
+1. **Always use specific Solidity versions**: Pin `pragma solidity ^0.8.26;` for reproducibility.
 2. **Enable optimizer**: Set `optimizer = true` with appropriate `optimizer_runs` for your use case.
 3. **Test thoroughly**: Aim for high coverage with unit, fuzz, and integration tests.
 4. **Use gas snapshots**: Track gas changes with `forge snapshot` and `forge snapshot --diff`.

@@ -13,7 +13,7 @@ Unit tests isolate individual functions with controlled inputs:
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
 import "../src/SimplePonzi.sol";
@@ -58,7 +58,7 @@ contract SimplePonziTest is Test {
         vm.prank(bob);
         ponzi.invest{value: 0.011 ether}();
         
-        // Alice should receive 110
+        // Alice should receive 110% of her investment
         uint256 expectedPayout = 0.01 ether * 11000 / 10000;
         assertEq(alice.balance - aliceBalanceBefore, expectedPayout);
         
@@ -92,11 +92,11 @@ Integration tests verify multiple contracts working together:
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
-import "../src/GameFi/GameToken.sol";
-import "../src/GameFi/GameStaking.sol";
+import "../src/GameToken.sol";
+import "../src/GameStaking.sol";
 
 contract GameFiIntegrationTest is Test {
     GameToken public token;
@@ -164,6 +164,8 @@ contract GameFiIntegrationTest is Test {
 
 *Integration testing*
 
+The full companion file adds `test_EmergencyUnstakeWhenRewardPoolUnfunded`, exercising Chapter 6's escape hatch: on an unfunded reward pool, `unstake` reverts while `emergencyUnstake` returns exactly the principal.
+
 ## Fuzz Testing
 
 Fuzz tests generate random inputs to discover edge cases:
@@ -171,7 +173,7 @@ Fuzz tests generate random inputs to discover edge cases:
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
 import "../src/SatoshiDice.sol";
@@ -188,8 +190,9 @@ contract SatoshiDiceFuzzTest is Test {
      * @notice Fuzz test: Any valid target should calculate consistent payouts
      */
     function testFuzz_PayoutCalculation(uint8 target, uint256 amount) public {
-        // Bound inputs to valid ranges
-        target = uint8(bound(target, 2, 99));
+        // Bound inputs to valid ranges (99 is excluded: the house edge
+        // exactly cancels the fair profit there, so the game rejects it)
+        target = uint8(bound(target, 2, 98));
         amount = bound(amount, 0.001 ether, 1 ether);
         
         uint256 payout = dice.calculatePayout(amount, target);
@@ -209,7 +212,7 @@ contract SatoshiDiceFuzzTest is Test {
      * @notice Fuzz test: Expected value should always be negative (house edge)
      */
     function testFuzz_HouseEdge(uint8 target) public {
-        target = uint8(bound(target, 2, 99));
+        target = uint8(bound(target, 2, 98));
         
         int256 ev = dice.expectedValue(1 ether, target);
         
@@ -223,9 +226,7 @@ contract SatoshiDiceFuzzTest is Test {
     function testFuzz_ContractBalanceInvariant(uint256 seed) public {
         vm.deal(address(this), 10 ether);
         dice.deposit{value: 10 ether}();
-        
-        uint256 initialBalance = address(dice).balance;
-        
+
         // Simulate many bets
         for (uint256 i = 0; i < 100; i++) {
             uint8 target = uint8(bound(uint256(keccak256(abi.encode(seed, i))), 2, 99));
@@ -253,6 +254,8 @@ contract SatoshiDiceFuzzTest is Test {
 
 <a id="lst:fuzz-testing"></a>
 
+The companion test file also carries a regression fuzz test, `testFuzz_RejectBetWhenBankrollCannotCoverPayout`, pinning Chapter 8's bankroll check: an empty-bankroll `SatoshiDice` must reject every valid bet upfront rather than accept a wager it could never pay out.
+
 ## Invariant Testing
 
 Invariants specify properties that must always hold:
@@ -260,13 +263,12 @@ Invariants specify properties that must always hold:
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "forge-std/InvariantTest.sol";
 import "forge-std/Test.sol";
 import "../src/SimpleLottery.sol";
 
-contract LotteryInvariantTest is InvariantTest, Test {
+contract LotteryInvariantTest is Test {
     SimpleLottery public lottery;
     Handler public handler;
     
@@ -285,8 +287,8 @@ contract LotteryInvariantTest is InvariantTest, Test {
     /**
      * @notice Invariant: Total invested should equal pot when no payouts
      */
-    function invariant_PotAccounting() public {
-        assertEq(lottery.totalInvested(), lottery.pot());
+    function invariant_PotAccounting() public view {
+        assertEq(address(lottery).balance, lottery.pot());
     }
     
     /**
@@ -299,14 +301,14 @@ contract LotteryInvariantTest is InvariantTest, Test {
     /**
      * @notice Invariant: Winner should only be set after draw
      */
-    function invariant_WinnerState() public {
+    function invariant_WinnerState() public view {
         if (lottery.winner() != address(0)) {
             assertTrue(lottery.phase() == SimpleLottery.Phase.Closed);
         }
     }
 }
 
-contract Handler {
+contract Handler is Test {
     SimpleLottery public lottery;
     
     constructor(SimpleLottery _lottery) {
@@ -329,6 +331,8 @@ contract Handler {
 
 *Invariant testing*
 
+The fuzzer calls the Handler's functions in random sequences, so the Handler shapes the inputs; it inherits `Test` so that cheatcodes like `bound` and `vm.deal` are available inside it.
+
 <a id="lst:invariant-testing"></a>
 
 ## Fork Testing
@@ -338,7 +342,7 @@ Test against live network state:
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
 import "forge-std/Test.sol";
 
@@ -364,10 +368,11 @@ contract ForkTest is Test {
         );
         
         (uint112 reserve0, uint112 reserve1,) = wethUsdc.getReserves();
-        
-        // WETH is token0, USDC is token1
-        uint256 price = (uint256(reserve1) * 1e18) / reserve0;
-        
+
+        // USDC is token0, WETH is token1 (USDC's address sorts below WETH's),
+        // so the WETH price in USDC (6 decimals) is reserve0 / reserve1
+        uint256 price = (uint256(reserve0) * 1e18) / reserve1;
+
         assertGt(price, 1000 * 1e6, "WETH should be > $1000");
     }
     
@@ -441,29 +446,45 @@ contract GasOptimizationTest is Test {
 
 ## Mutation Testing
 
-Mutation testing verifies test quality by introducing bugs:
+Mutation testing verifies test quality by introducing bugs. Certora's Gambit generates the mutants; your test suite is then run against each one to see whether it catches the injected bug. Install Gambit from the prebuilt binaries on its [GitHub releases page](https://github.com/Certora/gambit/releases), or build it from source with the Rust toolchain.
 
 ```bash
 
-# Install gambit for mutation testing
-cargo install gambit
+# Generate mutants (written under gambit_out/)
+gambit mutate --filename src/SimpleLottery.sol
 
-# Run mutation testing
-gambit mutate -f src/SimplePonzi.sol
-gambit test
-
-# This creates mutants like:
+# Gambit produces mutants like:
 # - Changing < to <=
 # - Removing require statements
 # - Changing constants
-# Tests should catch these mutations
 ```
+
+Gambit only generates the mutants -- running the tests against them is up to you. Swap each mutant in for the original file, run `forge test`, and count how many mutants the suite kills:
+
+```bash
+
+# Run the suite against every generated mutant
+killed=0
+total=0
+for mutant in gambit_out/mutants/*/src/SimpleLottery.sol; do
+    total=$((total + 1))
+    cp src/SimpleLottery.sol /tmp/SimpleLottery.sol.bak
+    cp "$mutant" src/SimpleLottery.sol
+    if ! forge test > /dev/null 2>&1; then
+        killed=$((killed + 1))   # Tests failed: mutant killed
+    fi
+    cp /tmp/SimpleLottery.sol.bak src/SimpleLottery.sol
+done
+echo "Mutation score: $killed/$total"
+```
+
+The metric is the **mutation score**: killed mutants divided by total mutants. A surviving mutant means a bug your tests would not catch.
 
 *Mutation testing workflow*
 
 ## Testing Best Practices
 
-1. **100\% code coverage** is the minimum, not the goal
+1. **100% code coverage** is the minimum, not the goal
 2. **Test invariants**, not just specific scenarios
 3. **Use fuzzing** to discover edge cases
 4. **Test on forks** with real protocol state
@@ -480,35 +501,35 @@ name: test
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+env:
+  FOUNDRY_PROFILE: ci
 
 jobs:
   check:
-    name: Foundry project
+    name: Foundry build & test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Run tests
-        run: forge test -vvv
+      - name: Build
+        run: forge build --sizes
 
-      - name: Run gas snapshot check
-        run: forge snapshot --check
-
-      - name: Run coverage
-        run: forge coverage --report lcov
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v3
-        with:
-          files: ./lcov.info
+      - name: Test
+        # ForkTest requires a mainnet RPC URL; run it separately once
+        # MAINNET_RPC_URL is configured as a repository secret.
+        run: forge test --no-match-path 'test/ForkTest.sol' -vvv
 ```
 
 *GitHub Actions CI configuration*
+
+The `ci` profile bumps fuzz runs (see `foundry.toml`), and the fork tests are excluded because they need a `MAINNET_RPC_URL` secret.
 
 This concludes our comprehensive guide to building games with Ethereum smart contracts. The appendix provides quick reference for gas costs and optimization patterns.

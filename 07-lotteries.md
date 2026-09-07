@@ -13,14 +13,14 @@ Lotteries are among the most popular blockchain gaming applications. They combin
 
 ## SimpleLottery: Commit-Reveal RNG
 
-The commit-reveal pattern provides cryptographically secure randomness without external oracle dependency.
+The commit-reveal pattern provides randomness without external oracle dependency, and honest participants get a fair draw. It is not manipulation-proof, however: the last participant to reveal can compute the final seed before deciding whether to reveal at all, and this contract imposes no penalty for withholding a reveal---production systems need reveal bonds or forfeiture penalties, or should use a VRF instead. Note also that `enter()` allows only one entry per address (buy multiple tickets in a single call): the winning seed XORs together every entry's revealed number, so a participant appearing twice would XOR their own contribution back out of the seed. The guard itself is an O(1) `hasEntered` mapping rather than a scan of the entries array, which would make filling a round quadratic in storage reads.
 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -50,6 +50,9 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
     
     uint256 public pot;
     Entry[] public entries;
+    /// @notice O(1) duplicate-entry check; scanning the entries array instead
+    /// would make filling a round O(n^2) in storage reads.
+    mapping(address => bool) public hasEntered;
     mapping(address => Commitment) public commitments;
     mapping(address => uint256) public revealedNumbers;
     
@@ -59,7 +62,7 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
     
     uint256 public phaseStartTime;
     
-    // House fee (2.5
+    // House fee (2.5%)
     uint256 public constant HOUSE_FEE_BPS = 250;
     uint256 public constant BPS_DENOMINATOR = 10000;
     
@@ -75,7 +78,7 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         uint256 _minEntries,
         uint256 _commitDuration,
         uint256 _revealDuration
-    ) {
+    ) Ownable(msg.sender) {
         ticketPrice = _ticketPrice;
         minEntries = _minEntries;
         commitDuration = _commitDuration;
@@ -91,7 +94,13 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         require(phase == Phase.Open, "Not open");
         require(msg.value == ticketPrice * ticketCount, "Incorrect payment");
         require(ticketCount > 0, "Must buy at least 1 ticket");
-        
+        // One entry per address: drawWinner XORs each entry's revealed
+        // number into the seed, so a participant appearing twice would XOR
+        // their own contribution back out and erase it from the accumulator.
+        // Buy multiple tickets in a single entry instead.
+        require(!_isParticipant(msg.sender), "Already entered");
+
+        hasEntered[msg.sender] = true;
         entries.push(Entry({
             participant: msg.sender,
             amount: msg.value,
@@ -162,7 +171,7 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         
         // Select winner based on ticket distribution
         uint256 totalTickets = pot / ticketPrice;
-        uint256 winningTicket = seed 
+        uint256 winningTicket = seed % totalTickets;
         
         uint256 currentTicket = 0;
         for (uint256 i = 0; i < entries.length; i++) {
@@ -180,8 +189,11 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         uint256 payout = pot - houseFee;
         
         paid = true;
-        payable(owner()).transfer(houseFee);
-        payable(winner).transfer(payout);
+        // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+        (bool feeSuccess, ) = payable(owner()).call{value: houseFee}("");
+        require(feeSuccess, "Fee transfer failed");
+        (bool paySuccess, ) = payable(winner).call{value: payout}("");
+        require(paySuccess, "Payout transfer failed");
         
         emit WinnerDrawn(winner, payout, winningNumber);
     }
@@ -211,10 +223,7 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
     }
     
     function _isParticipant(address user) internal view returns (bool) {
-        for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].participant == user) return true;
-        }
-        return false;
+        return hasEntered[user];
     }
     
     /**
@@ -249,14 +258,14 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
 
 ## RecurringLottery: Auto-Rollover
 
-For continuous operation, lotteries need automated rollover mechanisms.
+For continuous operation, lotteries need automated rollover mechanisms. Note that rolled-over funds seed the next round's pot without representing any tickets, so the contract tracks `ticketsSold` separately and draws the winner over that count---dividing the pot by the ticket price would invent phantom ticket indices that no participant holds.
 
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@chainlink/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
 
@@ -274,6 +283,7 @@ contract RecurringLottery is
         uint256 startTime;
         uint256 endTime;
         uint256 pot;
+        uint256 ticketsSold; // Tickets actually purchased (pot may also hold rollover)
         address[] participants;
         mapping(address => uint256) tickets;
         address winner;
@@ -285,7 +295,7 @@ contract RecurringLottery is
         uint256 ticketPrice;
         uint256 roundDuration;
         uint256 minPot; // Minimum pot to draw
-        uint256 rolloverPercent; // 
+        uint256 rolloverPercent; // % of pot to next round
         uint256 houseFeePercent;
     }
     
@@ -311,7 +321,7 @@ contract RecurringLottery is
         uint256 _minPot,
         uint256 _rolloverPercent,
         uint256 _houseFeePercent
-    ) {
+    ) Ownable(msg.sender) {
         config = Config({
             ticketPrice: _ticketPrice,
             roundDuration: _roundDuration,
@@ -336,6 +346,7 @@ contract RecurringLottery is
             round.participants.push(msg.sender);
         }
         round.tickets[msg.sender] += count;
+        round.ticketsSold += count;
         round.pot += msg.value;
         
         emit TicketPurchased(currentRoundId, msg.sender, count);
@@ -389,8 +400,13 @@ contract RecurringLottery is
             roundId
         )));
         
-        uint256 totalTickets = round.pot / config.ticketPrice;
-        uint256 winningTicket = randomness 
+        // Draw over tickets actually sold, never over the pot: rolled-over
+        // funds inflate the pot without adding tickets, and dividing the pot
+        // by the ticket price would create phantom ticket indices no
+        // participant holds, bricking the round.
+        uint256 totalTickets = round.ticketsSold;
+        require(totalTickets > 0, "No tickets sold");
+        uint256 winningTicket = randomness % totalTickets;
         round.winningTicket = winningTicket;
         
         // Find winner
@@ -416,8 +432,11 @@ contract RecurringLottery is
         round.completed = true;
         
         // Transfer payouts
-        payable(owner()).transfer(houseFee);
-        payable(round.winner).transfer(payout);
+        // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+        (bool feeSuccess, ) = payable(owner()).call{value: houseFee}("");
+        require(feeSuccess, "Fee transfer failed");
+        (bool paySuccess, ) = payable(round.winner).call{value: payout}("");
+        require(paySuccess, "Payout transfer failed");
         
         emit WinnerSelected(roundId, round.winner, payout);
         emit Rollover(roundId, rollover);
@@ -471,27 +490,41 @@ contract RecurringLottery is
 
 A more complex lottery mimicking traditional Powerball with 5 main numbers and 1 powerball.
 
+Prize claiming is deliberately split into two phases. A naive design that pays each winner the full tier pool on claim is insolvent the moment a tier has more than one winner: every winner would withdraw the entire pool, draining funds that belong to other winners---or other draws. Instead, winners first *register* their ticket with `claimPrize()` during a 7-day claim window; once the window closes the winner count per tier is final, and each winner withdraws an equal, pro-rata share of the tier pool with `withdrawPrize()`. Tiers that end the window with no registered winners can be recovered by the owner via `withdrawUnclaimed()`.
+
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title PowerballLottery
  * @notice Multi-tier lottery with 5+1 number matching
+ * @dev Prize accounting: each draw's tier pools are funded solely from that
+ *      draw's own pot, and payouts are split in two phases. Winners first
+ *      register their ticket with claimPrize() during the claim window; once
+ *      the window closes the winner count per tier is final, and each winner
+ *      withdraws an equal share of the tier pool with withdrawPrize(). This
+ *      guarantees a draw can never pay out more than its own pot, even with
+ *      multiple winners in a tier or several draws sharing the contract
+ *      balance. Pools of tiers with no registered winners can be recovered by
+ *      the owner after the window via withdrawUnclaimed().
  */
 contract PowerballLottery is ReentrancyGuard, Ownable {
-    
+
     struct Ticket {
         address owner;
+        uint256 drawId;   // Draw this ticket was purchased for
         uint8[5] numbers; // Main numbers: 1-69
         uint8 powerball;  // Powerball: 1-26
-        bool claimed;
+        bool registered;  // Win registered during the claim window
+        bool claimed;     // Prize withdrawn
+        uint8 wonTier;    // Winning tier recorded at registration
     }
-    
+
     struct Draw {
         uint256 drawTime;
         uint8[5] winningNumbers;
@@ -499,12 +532,14 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         uint256 ticketCount;
         uint256 totalPot;
         bool completed;
-        mapping(uint8 => uint256) prizeTiers; // tier => amount
+        mapping(uint8 => uint256) prizeTiers;  // tier => pool amount
+        mapping(uint8 => uint256) tierWinners; // tier => registered winner count
     }
-    
+
     uint256 public ticketPrice = 0.01 ether;
     uint256 public drawInterval = 1 days;
     uint256 public nextDrawTime;
+    uint256 public constant CLAIM_WINDOW = 7 days;
     
     mapping(uint256 => Ticket) public tickets;
     mapping(uint256 => Draw) public draws;
@@ -528,6 +563,12 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         uint8[5] numbers,
         uint8 powerball
     );
+    event PrizeRegistered(
+        uint256 indexed drawId,
+        uint256 indexed ticketId,
+        address winner,
+        uint256 tier
+    );
     event PrizeClaimed(
         uint256 indexed drawId,
         address winner,
@@ -535,7 +576,7 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         uint256 amount
     );
     
-    constructor() {
+    constructor() Ownable(msg.sender) {
         nextDrawTime = block.timestamp + drawInterval;
     }
     
@@ -554,9 +595,12 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         ticketId = ticketCounter++;
         tickets[ticketId] = Ticket({
             owner: msg.sender,
+            drawId: drawCounter,
             numbers: numbers,
             powerball: powerball,
-            claimed: false
+            registered: false,
+            claimed: false,
+            wonTier: 0
         });
         
         uint256 currentDraw = drawCounter;
@@ -592,39 +636,94 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
     }
     
     /**
-     * @notice Claim prize for a winning ticket
+     * @notice Register a winning ticket during the claim window
+     * @dev The ticket must have been purchased for `drawId`; payouts happen
+     *      via withdrawPrize() once the window closes and the winner count
+     *      per tier is final, so a tier pool is never overpaid.
      */
     function claimPrize(uint256 ticketId, uint256 drawId) external nonReentrant {
-        require(draws[drawId].completed, "Draw not complete");
-        
+        Draw storage draw = draws[drawId];
+        require(draw.completed, "Draw not complete");
+        require(block.timestamp <= draw.drawTime + CLAIM_WINDOW, "Claim window closed");
+
+        Ticket storage ticket = tickets[ticketId];
+        require(ticket.drawId == drawId, "Ticket not for this draw");
+        require(ticket.owner == msg.sender, "Not ticket owner");
+        require(!ticket.registered, "Already registered");
+
+        uint8 tier = _checkWinningTier(ticket, draw);
+        require(tier > 0, "Not a winner");
+        require(draw.prizeTiers[tier] > 0, "No prize for tier");
+
+        ticket.registered = true;
+        ticket.wonTier = tier;
+        draw.tierWinners[tier]++;
+
+        emit PrizeRegistered(drawId, ticketId, msg.sender, tier);
+    }
+
+    /**
+     * @notice Withdraw an equal share of the tier pool after the claim window
+     */
+    function withdrawPrize(uint256 ticketId) external nonReentrant {
         Ticket storage ticket = tickets[ticketId];
         require(ticket.owner == msg.sender, "Not ticket owner");
+        require(ticket.registered, "Not registered");
         require(!ticket.claimed, "Already claimed");
-        
-        uint8 tier = _checkWinningTier(ticket, draws[drawId]);
-        require(tier > 0, "Not a winner");
-        
-        uint256 prize = draws[drawId].prizeTiers[tier];
-        require(prize > 0, "No prize for tier");
-        
+
+        Draw storage draw = draws[ticket.drawId];
+        require(block.timestamp > draw.drawTime + CLAIM_WINDOW, "Claim window open");
+
+        uint8 tier = ticket.wonTier;
+        uint256 prize = draw.prizeTiers[tier] / draw.tierWinners[tier];
+
         ticket.claimed = true;
-        payable(msg.sender).transfer(prize);
-        
-        emit PrizeClaimed(drawId, msg.sender, tier, prize);
+        // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+        (bool success, ) = payable(msg.sender).call{value: prize}("");
+        require(success, "Prize transfer failed");
+
+        emit PrizeClaimed(ticket.drawId, msg.sender, tier, prize);
     }
-    
+
+    /**
+     * @notice Recover pools of tiers with no registered winners after the claim window
+     */
+    function withdrawUnclaimed(uint256 drawId) external onlyOwner {
+        Draw storage draw = draws[drawId];
+        require(draw.completed, "Draw not complete");
+        require(block.timestamp > draw.drawTime + CLAIM_WINDOW, "Claim window open");
+
+        uint256 amount;
+        for (uint8 i = 1; i <= 5; i++) {
+            if (draw.tierWinners[i] == 0) {
+                amount += draw.prizeTiers[i];
+                draw.prizeTiers[i] = 0;
+            }
+        }
+        require(amount > 0, "Nothing to withdraw");
+
+        (bool success, ) = payable(owner()).call{value: amount}("");
+        require(success, "Withdraw transfer failed");
+    }
+
     /**
      * @notice Check if a ticket won
+     * @dev Returns the current per-winner share; the final share is only
+     *      known once the claim window has closed.
      */
-    function checkTicket(uint256 ticketId, uint256 drawId) 
-        external 
-        view 
-        returns (uint8 tier, uint256 prize) 
+    function checkTicket(uint256 ticketId, uint256 drawId)
+        external
+        view
+        returns (uint8 tier, uint256 prize)
     {
         if (!draws[drawId].completed) return (0, 0);
-        
+        if (tickets[ticketId].drawId != drawId) return (0, 0);
+
         tier = _checkWinningTier(tickets[ticketId], draws[drawId]);
-        prize = draws[drawId].prizeTiers[tier];
+        uint256 winners = draws[drawId].tierWinners[tier];
+        prize = winners > 0
+            ? draws[drawId].prizeTiers[tier] / winners
+            : draws[drawId].prizeTiers[tier];
     }
     
     function _validateNumbers(uint8[5] memory numbers, uint8 powerball) 
@@ -653,18 +752,18 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         
         // Generate unique numbers 1-69
         for (uint256 i = 0; i < 5; i++) {
-            numbers[i] = uint8((seed 
+            numbers[i] = uint8((seed % 69) + 1);
             seed >>= 8;
             
             // Ensure uniqueness (simple approach)
             for (uint256 j = 0; j < i; j++) {
                 if (numbers[i] == numbers[j]) {
-                    numbers[i] = uint8(((numbers[i] + seed) 
+                    numbers[i] = uint8(((numbers[i] + seed) % 69) + 1);
                 }
             }
         }
         
-        powerball = uint8((seed 
+        powerball = uint8((seed % 26) + 1);
     }
     
     function _checkWinningTier(Ticket memory ticket, Draw storage draw) 
@@ -717,100 +816,108 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
 
 For production use, integrate Chainlink VRF for verifiable randomness.
 
+> **Version note.** This example targets Chainlink VRF v2.5. Compared to v2, the consumer base contract is `VRFConsumerBaseV2Plus` (which exposes the coordinator as `s_vrfCoordinator` and brings its own `ConfirmedOwner`), subscription IDs are `uint256` rather than `uint64`, and `requestRandomWords` takes a single `RandomWordsRequest` struct whose `extraArgs` carries a `nativePayment` flag---set it to `true` to pay VRF fees in native ETH instead of LINK.
+
 ```solidity
 
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity ^0.8.26;
 
-import "@chainlink/contracts/src/v0.8/vrf/VRFConsumerBaseV2.sol";
-import "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 
 /**
  * @title VRFUpgradedLottery
- * @notice Lottery using Chainlink VRF v2 for secure randomness
+ * @notice Lottery using Chainlink VRF v2.5 for secure randomness
+ * @dev VRFConsumerBaseV2Plus exposes the coordinator as `s_vrfCoordinator`
+ *      and brings its own ConfirmedOwner (onlyOwner) with it.
  */
-contract VRFUpgradedLottery is VRFConsumerBaseV2 {
-    VRFCoordinatorV2Interface public coordinator;
-    
+contract VRFUpgradedLottery is VRFConsumerBaseV2Plus {
     bytes32 public keyHash;
-    uint64 public subscriptionId;
+    uint256 public subscriptionId; // v2.5 subscription ids are uint256
     uint32 public callbackGasLimit = 100000;
     uint16 public requestConfirmations = 3;
-    
+
     struct RequestStatus {
         bool fulfilled;
         bool exists;
         uint256[] randomWords;
         uint256 drawId;
     }
-    
+
     mapping(uint256 => RequestStatus) public requests;
     uint256 public lastRequestId;
-    
+
     // Lottery state
     mapping(uint256 => uint256) public drawToRequest;
     bool public drawPending;
-    
+
     event RandomnessRequested(uint256 requestId, uint256 drawId);
     event RandomnessFulfilled(uint256 requestId, uint256[] randomWords);
-    
+
     constructor(
         address _vrfCoordinator,
         bytes32 _keyHash,
-        uint64 _subId
-    ) VRFConsumerBaseV2(_vrfCoordinator) {
-        coordinator = VRFCoordinatorV2Interface(_vrfCoordinator);
+        uint256 _subId
+    ) VRFConsumerBaseV2Plus(_vrfCoordinator) {
         keyHash = _keyHash;
         subscriptionId = _subId;
     }
-    
+
     /**
      * @notice Request randomness for a draw
      */
     function requestRandomness(uint256 drawId) external returns (uint256 requestId) {
         require(!drawPending, "Draw in progress");
-        
-        requestId = coordinator.requestRandomWords(
-            keyHash,
-            subscriptionId,
-            requestConfirmations,
-            callbackGasLimit,
-            1 // Request 1 random number
+
+        requestId = s_vrfCoordinator.requestRandomWords(
+            VRFV2PlusClient.RandomWordsRequest({
+                keyHash: keyHash,
+                subId: subscriptionId,
+                requestConfirmations: requestConfirmations,
+                callbackGasLimit: callbackGasLimit,
+                numWords: 1, // Request 1 random number
+                // nativePayment: true would pay VRF fees in native ETH
+                // instead of LINK -- a v2.5 addition.
+                extraArgs: VRFV2PlusClient._argsToBytes(
+                    VRFV2PlusClient.ExtraArgsV1({nativePayment: false})
+                )
+            })
         );
-        
+
         requests[requestId] = RequestStatus({
             fulfilled: false,
             exists: true,
             randomWords: new uint256[](0),
             drawId: drawId
         });
-        
+
         drawToRequest[drawId] = requestId;
         drawPending = true;
         lastRequestId = requestId;
-        
+
         emit RandomnessRequested(requestId, drawId);
     }
-    
+
     /**
      * @notice VRF callback with random numbers
      */
-    function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords)
+    function fulfillRandomWords(uint256 requestId, uint256[] calldata randomWords)
         internal
         override
     {
         require(requests[requestId].exists, "Request not found");
-        
+
         requests[requestId].fulfilled = true;
         requests[requestId].randomWords = randomWords;
         drawPending = false;
-        
+
         // Process the draw with verified randomness
         _completeDraw(requests[requestId].drawId, randomWords[0]);
-        
+
         emit RandomnessFulfilled(requestId, randomWords);
     }
-    
+
     function _completeDraw(uint256 drawId, uint256 randomness) internal {
         // Implement winner selection using verified randomness
         // randomness is cryptographically secure from Chainlink
@@ -824,15 +931,13 @@ contract VRFUpgradedLottery is VRFConsumerBaseV2 {
 
 ## Lottery Security Checklist
 
-| p{6cm}p{8cm}@{}}
-
-**Requirement** | **Implementation** |
+| **Requirement** | **Implementation** |
 |---|---|
 | Verifiable randomness | Chainlink VRF or commit-reveal |
 | Front-running resistance | Commit-reveal pattern |
 | Auto-execution | Chainlink Automation |
 | Fair ticket distribution | Cumulative probability mapping |
-| Multiple winners support | Tiered prize structures |
+| Multiple winners support | Two-phase claims with pro-rata tier pools |
 | Emergency pause | Circuit breaker pattern |
 
 Chapter 8 continues with gambling games and house edge mechanics.
