@@ -443,29 +443,45 @@ contract GasOptimizationTest is Test {
 
 ## Mutation Testing
 
-Mutation testing verifies test quality by introducing bugs:
+Mutation testing verifies test quality by introducing bugs. Certora's Gambit generates the mutants; your test suite is then run against each one to see whether it catches the injected bug. Install Gambit from the prebuilt binaries on its [GitHub releases page](https://github.com/Certora/gambit/releases), or build it from source with the Rust toolchain.
 
 ```bash
 
-# Install gambit for mutation testing
-cargo install gambit
+# Generate mutants (written under gambit_out/)
+gambit mutate --filename src/SimpleLottery.sol
 
-# Run mutation testing
-gambit mutate -f src/SimplePonzi.sol
-gambit test
-
-# This creates mutants like:
+# Gambit produces mutants like:
 # - Changing < to <=
 # - Removing require statements
 # - Changing constants
-# Tests should catch these mutations
 ```
+
+Gambit only generates the mutants -- running the tests against them is up to you. Swap each mutant in for the original file, run `forge test`, and count how many mutants the suite kills:
+
+```bash
+
+# Run the suite against every generated mutant
+killed=0
+total=0
+for mutant in gambit_out/mutants/*/src/SimpleLottery.sol; do
+    total=$((total + 1))
+    cp src/SimpleLottery.sol /tmp/SimpleLottery.sol.bak
+    cp "$mutant" src/SimpleLottery.sol
+    if ! forge test > /dev/null 2>&1; then
+        killed=$((killed + 1))   # Tests failed: mutant killed
+    fi
+    cp /tmp/SimpleLottery.sol.bak src/SimpleLottery.sol
+done
+echo "Mutation score: $killed/$total"
+```
+
+The metric is the **mutation score**: killed mutants divided by total mutants. A surviving mutant means a bug your tests would not catch.
 
 *Mutation testing workflow*
 
 ## Testing Best Practices
 
-1. **100\% code coverage** is the minimum, not the goal
+1. **100% code coverage** is the minimum, not the goal
 2. **Test invariants**, not just specific scenarios
 3. **Use fuzzing** to discover edge cases
 4. **Test on forks** with real protocol state
@@ -482,35 +498,35 @@ name: test
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+env:
+  FOUNDRY_PROFILE: ci
 
 jobs:
   check:
-    name: Foundry project
+    name: Foundry build & test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Run tests
-        run: forge test -vvv
+      - name: Build
+        run: forge build --sizes
 
-      - name: Run gas snapshot check
-        run: forge snapshot --check
-
-      - name: Run coverage
-        run: forge coverage --report lcov
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v3
-        with:
-          files: ./lcov.info
+      - name: Test
+        # ForkTest requires a mainnet RPC URL; run it separately once
+        # MAINNET_RPC_URL is configured as a repository secret.
+        run: forge test --no-match-path 'test/ForkTest.sol' -vvv
 ```
 
 *GitHub Actions CI configuration*
+
+The `ci` profile bumps fuzz runs (see `foundry.toml`), and the fork tests are excluded because they need a `MAINNET_RPC_URL` secret.
 
 This concludes our comprehensive guide to building games with Ethereum smart contracts. The appendix provides quick reference for gas costs and optimization patterns.

@@ -4,15 +4,17 @@
 
 Blockchain gambling games can offer provably fair mechanics, transparent odds, and instant global accessibility---when built on a secure randomness source. This chapter implements classic games with mathematical precision and proper house edge management; note that the Roulette example deliberately uses insecure randomness as a teaching exercise.
 
+> **Legal disclaimer.** Operating an on-chain gambling service is illegal or licence-gated in most jurisdictions, regardless of how the contracts are deployed or who holds the keys. The contracts in this chapter are educational implementations for studying game mechanics, house edge mathematics, and security patterns---they are not products to deploy. Some of them (notably Roulette) are deliberately insecure teaching examples. You are responsible for knowing and complying with the law wherever you operate.
+
 ### House Edge Fundamentals
 
 The house edge ensures long-term sustainability while providing entertainment value:
 
-\begin{equation}
-\text{House Edge} = -\frac{\text{Expected Value}}{\text{Wager Amount}} \times 100\%
-\end{equation}
+```
+House Edge = -(Expected Value / Wager Amount) × 100%
+```
 
-Because the player's expected value is negative, the house edge comes out as a positive percentage---the share of each wager the house keeps on average. A 2\% house edge means players lose an average of 2\% per bet over the long run---comparable to or better than traditional casinos.
+Because the player's expected value is negative, the house edge comes out as a positive percentage---the share of each wager the house keeps on average. A 2% house edge means players lose an average of 2% per bet over the long run---comparable to or better than traditional casinos.
 
 ## SatoshiDice: Modernized
 
@@ -159,7 +161,9 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
         if (result < bet.target) {
             bet.won = true;
             totalPaid += bet.payout;
-            payable(bet.player).transfer(bet.payout);
+            // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+            (bool success, ) = payable(bet.player).call{value: bet.payout}("");
+            require(success, "Payout transfer failed");
         }
         
         emit BetRevealed(
@@ -214,7 +218,8 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
      */
     function withdraw(uint256 amount) external onlyOwner {
         require(amount <= address(this).balance, "Insufficient balance");
-        payable(owner()).transfer(amount);
+        (bool success, ) = payable(owner()).call{value: amount}("");
+        require(success, "Withdraw transfer failed");
         emit FundsWithdrawn(owner(), amount);
     }
     
@@ -250,15 +255,13 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
 
 ### SatoshiDice Mathematics
 
-| ccccc@{}}
-
-**Target** | **Win Prob** | **Multiplier** | **House Edge** | **RTP** |
+| **Target** | **Win Prob** | **Multiplier** | **House Edge** | **RTP** |
 |---|---|---|---|---|
-| 10 | 9\% | 10.89x | 2.0\% | 98.0\% |
-| 25 | 24\% | 4.08x | 2.0\% | 98.0\% |
-| 50 | 49\% | 2.00x | 2.0\% | 98.0\% |
-| 75 | 74\% | 1.32x | 2.0\% | 98.0\% |
-| 90 | 89\% | 1.10x | 2.0\% | 98.0\% |
+| 10 | 9% | 10.89x | 2.0% | 98.0% |
+| 25 | 24% | 4.08x | 2.0% | 98.0% |
+| 50 | 49% | 2.00x | 2.0% | 98.0% |
+| 75 | 74% | 1.32x | 2.0% | 98.0% |
+| 90 | 89% | 1.10x | 2.0% | 98.0% |
 
 ## Roulette: Multi-Bet Type
 
@@ -388,13 +391,15 @@ contract Roulette is ReentrancyGuard, Ownable {
             newSpin.bets.push(bets[i]);
         }
         
+        totalWagered += totalBet;
+
         // Pay out
         if (payout > 0) {
             totalPaid += payout;
-            payable(msg.sender).transfer(payout);
+            // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+            (bool success, ) = payable(msg.sender).call{value: payout}("");
+            require(success, "Payout transfer failed");
         }
-        
-        totalWagered += totalBet;
         
         emit SpinPlaced(msg.sender, spinId, totalBet);
         emit SpinResult(msg.sender, spinId, result, payout, isRed[result]);
@@ -540,19 +545,17 @@ contract Roulette is ReentrancyGuard, Ownable {
 
 ### Roulette Mathematics
 
-European roulette with single zero has a consistent 2.7\% house edge:
+European roulette with single zero has a consistent 2.7% house edge:
 
-| lccc@{}}
-
-**Bet Type** | **Numbers Covered** | **Payout** | **Probability** |
+| **Bet Type** | **Numbers Covered** | **Payout** | **Probability** |
 |---|---|---|---|
-| Straight | 1 | 35:1 | 2.7\% |
-| Split | 2 | 17:1 | 5.4\% |
-| Street | 3 | 11:1 | 8.1\% |
-| Corner | 4 | 8:1 | 10.8\% |
-| Six Line | 6 | 5:1 | 16.2\% |
-| Dozen/Column | 12 | 2:1 | 32.4\% |
-| Even/Odd/Red/Black/High/Low | 18 | 1:1 | 48.6\% |
+| Straight | 1 | 35:1 | 2.7% |
+| Split | 2 | 17:1 | 5.4% |
+| Street | 3 | 11:1 | 8.1% |
+| Corner | 4 | 8:1 | 10.8% |
+| Six Line | 6 | 5:1 | 16.2% |
+| Dozen/Column | 12 | 2:1 | 32.4% |
+| Even/Odd/Red/Black/High/Low | 18 | 1:1 | 48.6% |
 
 ## House Edge Calculations
 
@@ -560,9 +563,9 @@ European roulette with single zero has a consistent 2.7\% house edge:
 
 For any bet, the expected value is:
 
-\begin{equation}
-EV = (P_{win} \times W) - (P_{loss} \times B)
-\end{equation}
+```
+EV = (P_win × W) - (P_loss × B)
+```
 
 Where:
 - $P_{win}$ = Probability of winning
@@ -574,9 +577,9 @@ Where:
 
 For bankroll management, the risk of ruin formula:
 
-\begin{equation}
-RoR = \left(\frac{q}{p}\right)^n
-\end{equation}
+```
+RoR = (q / p)^n
+```
 
 Where:
 - $p$ = Probability of winning
@@ -587,9 +590,9 @@ Where:
 
 Optimal bet sizing:
 
-\begin{equation}
-f^* = \frac{bp - q}{b}
-\end{equation}
+```
+f* = (bp - q) / b
+```
 
 Where:
 - $f^*$ = Fraction of bankroll to bet

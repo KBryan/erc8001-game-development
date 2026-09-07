@@ -137,7 +137,9 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
         if (result < bet.target) {
             bet.won = true;
             totalPaid += bet.payout;
-            payable(bet.player).transfer(bet.payout);
+            // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+            (bool success, ) = payable(bet.player).call{value: bet.payout}("");
+            require(success, "Payout transfer failed");
         }
         
         emit BetRevealed(
@@ -192,7 +194,8 @@ contract SatoshiDice is ReentrancyGuard, Ownable {
      */
     function withdraw(uint256 amount) external onlyOwner {
         require(amount <= address(this).balance, "Insufficient balance");
-        payable(owner()).transfer(amount);
+        (bool success, ) = payable(owner()).call{value: amount}("");
+        require(success, "Withdraw transfer failed");
         emit FundsWithdrawn(owner(), amount);
     }
     

@@ -33,14 +33,16 @@ contract ModernGame {
 
 #### The `unchecked Block`
 
-For scenarios where overflow is acceptable or performance-critical, the `unchecked` block removes protection:
+For operations where overflow is provably impossible, the `unchecked` block removes the compiler's protection. The rule is strict: use `unchecked` only for values whose bounds you control---like a loop counter limited by an array's length---and never for sums or products of attacker-influenced inputs.
 
 ```solidity
 
 contract GasOptimizedGame {
+    mapping(address => uint256) public balances;
+
     function incrementRound(uint256 current) public pure returns (uint256) {
         unchecked {
-            // Save ~80 gas when overflow is impossible by design
+            // Safe: a round counter cannot realistically reach 2^256
             return current + 1;
         }
     }
@@ -53,28 +55,28 @@ contract GasOptimizedGame {
 
         uint256 totalAmount = 0;
         for (uint256 i = 0; i < recipients.length;) {
-            _transfer(recipients[i], amounts[i]);
+            // Checked: amounts are caller-controlled, so the sum
+            // must keep overflow protection
+            totalAmount += amounts[i];
+            balances[recipients[i]] += amounts[i];
 
             unchecked {
-                // i++ cannot overflow in realistic scenarios
-                totalAmount += amounts[i];
-                i++;
+                // Safe: i is bounded by recipients.length
+                ++i;
             }
         }
+
+        // Checked: reverts if the caller lacks the funds
+        balances[msg.sender] -= totalAmount;
     }
 }
 ```
 
 *Strategic use of unchecked blocks*
 
-| lcc@{}}
+Note that `totalAmount += amounts[i]` stays checked: the amounts come straight from calldata, and an attacker who could overflow that sum would credit recipients with more than the sender pays. Only the counter increment---which can never exceed the array length---goes inside `unchecked`.
 
-**Operation** | **Checked (0.8.x)** | **Unchecked** |
-|---|---|---|
-| Addition | 38 gas | 18 gas |
-| Subtraction | 38 gas | 18 gas |
-| Multiplication | 50 gas | 30 gas |
-| Increment (i++) | 38 gas | 8 gas |
+The savings are real but modest: a raw `ADD` opcode costs 3 gas, while the compiler's overflow check adds roughly 20--40 gas per operation in context (the comparison, conditional jump, and revert path). Exact numbers vary by compiler version and surrounding code, so measure with `forge snapshot` rather than relying on fixed figures. In hot loops, the counter increment is usually the best `unchecked` candidate.
 
 ## Custom Errors
 
@@ -124,16 +126,7 @@ contract GamingErrors {
 
 ### Gas Savings Analysis
 
-Custom errors save significant gas, especially for reverts that are rarely triggered:
-
-| lcc@{}}
-
-**Revert Type** | **Deployment Gas** | **Revert Gas** |
-|---|---|---|
-| String message | +2000 per unique | 150 + length |
-| Custom error | +400 per unique | ~100 flat |
-
-For a gaming contract with 10 different error conditions, custom errors save approximately 16,000 gas at deployment and 50+ gas per revert.
+Custom errors save gas in two places. At deployment, each revert string must be stored in the contract's bytecode, while a custom error contributes only a four-byte selector plus a little dispatch code---the longer and more numerous your error messages, the bigger the win. At revert time, ABI-encoding a selector (plus any typed arguments) is cheaper than ABI-encoding a string. Exact figures depend on compiler version, optimizer settings, and message length, so treat any fixed numbers with suspicion and compare with `forge snapshot` on your own contract. For a gaming contract with many distinct error conditions, the deployment savings alone usually justify the switch.
 
 ## Immutable and Constant Variables
 
@@ -166,29 +159,28 @@ contract GameConfiguration {
 
 ### Storage Layout Optimization
 
-Storage operations are expensive. Pack variables efficiently:
+Storage operations are expensive. Solidity packs adjacent declarations into 32-byte slots in order, so declaration order matters: a full-width `uint256` placed between two half-width values prevents them from sharing a slot.
 
 ```solidity
 
 contract InefficientStorage {
     // Uses 3 storage slots
-    bool public isActive;      // Slot 0 (1 byte, 31 wasted)
-    address public owner;      // Slot 1 (20 bytes)
-    uint256 public balance;    // Slot 2 (32 bytes)
-    uint8 public decimals;     // Slot 3 (1 byte, 31 wasted)
+    uint128 public rewardRate;   // Slot 0: 16 bytes (16 wasted)
+    uint256 public totalStaked;  // Slot 1: 32 bytes (full slot)
+    uint128 public lastUpdate;   // Slot 2: 16 bytes (16 wasted)
 }
 
 contract OptimizedStorage {
     // Uses 2 storage slots
-    address public owner;      // Slot 0: 20 bytes
-    uint96 public balance;     // Slot 0: 12 bytes (packed with address)
-    bool public isActive;      // Slot 1: 1 byte
-    uint8 public decimals;     // Slot 1: 1 byte (packed)
-    uint248 public feeReserve; // Slot 1: remaining 30 bytes
+    uint128 public rewardRate;   // Slot 0: 16 bytes
+    uint128 public lastUpdate;   // Slot 0: 16 bytes (packed)
+    uint256 public totalStaked;  // Slot 1: 32 bytes (full slot)
 }
 ```
 
 *Storage packing optimization*
+
+Reordering the declarations saves one slot---roughly 20,000 gas the first time that slot would have been written, and cheaper reads whenever both packed values are needed together, since one `SLOAD` fetches the pair.
 
 ### Event Optimization
 
@@ -199,9 +191,9 @@ Events are the cheapest form of storage. Use indexed parameters for efficient fi
 contract EventOptimized {
     // Max 3 indexed parameters (topic0-3)
     event BetPlaced(
-        indexed address player,
-        indexed uint256 gameId,
-        indexed uint256 roundId,
+        address indexed player,
+        uint256 indexed gameId,
+        uint256 indexed roundId,
         uint256 amount,
         uint8 betType,
         uint256 timestamp
@@ -209,10 +201,12 @@ contract EventOptimized {
 
     // Non-indexed data is cheaper but harder to filter
     event GameResult(
-        indexed uint256 gameId,
+        uint256 indexed gameId,
         address[] winners,  // Dynamic, not indexed
         uint256[] payouts   // Dynamic, not indexed
     );
+
+    uint256 public currentRound;
 
     function placeBet(uint256 gameId, uint8 betType) external payable {
         // ... logic ...
@@ -269,13 +263,15 @@ contract DataStructureChoice {
 
 ## Function Optimization
 
-### External vs Public
+### Calldata vs Memory Parameters
+
+Visibility (`external` vs `public`) is about API surface: `public` functions can also be called internally, `external` ones cannot. Since Solidity 0.6.9, either visibility can take `calldata` parameters, so the gas lever is not the visibility keyword---it is the data location of reference-type parameters. A `memory` parameter forces the compiler to copy the argument out of calldata; a `calldata` parameter is read in place.
 
 ```solidity
 
-contract FunctionVisibility {
-    // Public: copies calldata to memory (expensive)
-    function processPublic(uint256[] memory data) public pure returns (uint256) {
+contract DataLocation {
+    // Memory: the array is copied from calldata to memory on entry (expensive)
+    function processMemory(uint256[] memory data) public pure returns (uint256) {
         uint256 sum = 0;
         for (uint256 i = 0; i < data.length; i++) {
             sum += data[i];
@@ -283,8 +279,8 @@ contract FunctionVisibility {
         return sum;
     }
 
-    // External: reads directly from calldata (cheap)
-    function processExternal(uint256[] calldata data) external pure returns (uint256) {
+    // Calldata: reads directly from calldata, no copy (cheap)
+    function processCalldata(uint256[] calldata data) public pure returns (uint256) {
         uint256 sum = 0;
         for (uint256 i = 0; i < data.length; i++) {
             sum += data[i];
@@ -292,11 +288,13 @@ contract FunctionVisibility {
         return sum;
     }
 
-    // Save ~800 gas on 100-element array
+    // Skipping the copy saves gas proportional to the array's size
 }
 ```
 
-*External vs public for arrays*
+*Calldata vs memory for array parameters*
+
+Still prefer `external` for functions that are never called internally---it documents intent and keeps the internal call graph honest---but choose `calldata` for the gas savings.
 
 ### View Function Caching
 
@@ -347,6 +345,15 @@ For maximum gas efficiency in hot paths, inline assembly can be employed:
 ```solidity
 
 contract AssemblyOptimized {
+    error TransferFailed();
+
+    // The plain Solidity version: clear, and already cheap
+    function sendETHSolidity(address payable recipient, uint256 amount) internal {
+        (bool success, ) = recipient.call{value: amount}("");
+        if (!success) revert TransferFailed();
+    }
+
+    // The assembly equivalent
     function sendETH(address payable recipient, uint256 amount) internal {
         assembly {
             // Call with empty calldata
@@ -361,18 +368,18 @@ contract AssemblyOptimized {
             )
 
             if iszero(success) {
-                // Revert with error selector
-                mstore(0x00, 0x08c379a0) // Error(string) selector
+                // TransferFailed() selector, left-aligned in the word
+                mstore(0x00, shl(224, 0x90b8ec18))
                 revert(0x00, 0x04)
             }
         }
     }
-
-    // Save ~150 gas per transfer vs Solidity call
 }
 ```
 
 *Assembly optimization for ETH transfers*
+
+Note the selector handling: `0x90b8ec18` is `bytes4(keccak256("TransferFailed()"))`, and revert data must carry it in the *first* four bytes of the word, so it is shifted left by 224 bits before the `revert(0x00, 0x04)`. Storing the selector right-aligned would revert with four zero bytes instead. The real savings here come from using a custom error rather than a revert string; the assembly call itself buys little over the Solidity version, and the exact difference depends on compiler version and optimizer settings---profile before committing to assembly.
 
 ## Best Practices Summary
 
@@ -380,7 +387,7 @@ contract AssemblyOptimized {
 2. **Employ custom errors** for all revert conditions
 3. **Apply unchecked blocks** strategically in loops and safe arithmetic
 4. **Pack storage variables** to minimize slot usage
-5. **Use external** over public for array parameters
+5. **Use calldata** over memory for reference-type parameters (and external for functions never called internally)
 6. **Cache storage reads** in memory for repeated access
 7. **Minimize event data** but use indexed parameters wisely
 8. **Choose mappings** for O(1) lookups over arrays

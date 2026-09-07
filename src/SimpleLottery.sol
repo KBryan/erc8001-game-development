@@ -161,8 +161,11 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         uint256 payout = pot - houseFee;
         
         paid = true;
-        payable(owner()).transfer(houseFee);
-        payable(winner).transfer(payout);
+        // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+        (bool feeSuccess, ) = payable(owner()).call{value: houseFee}("");
+        require(feeSuccess, "Fee transfer failed");
+        (bool paySuccess, ) = payable(winner).call{value: payout}("");
+        require(paySuccess, "Payout transfer failed");
         
         emit WinnerDrawn(winner, payout, winningNumber);
     }

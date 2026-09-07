@@ -176,7 +176,7 @@ contract SimplePonzi {
 }
 ```
 
-*SimplePonzi contract (232 lines)*
+*SimplePonzi contract*
 
 <a id="lst:simple-ponzi"></a>
 
@@ -184,13 +184,11 @@ contract SimplePonzi {
 
 The contract demonstrates the Ponzi mechanism clearly:
 
-1. **Investment requirement**: Each new investor must pay 110\% of the previous investment
-2. **Immediate payout**: The investor being replaced receives 110\% of their investment, funded directly by the new deposit
+1. **Investment requirement**: Each new investor must pay 110% of the previous investment
+2. **Immediate payout**: The investor being replaced receives 110% of their investment, funded directly by the new deposit
 3. **Sustainability**: Requires infinite exponential growth to pay all investors
 
-| cccc@{}}
-
-**Round** | **Investment** | **Payout** | **New Capital Required** |
+| **Round** | **Investment** | **Payout** | **New Capital Required** |
 |---|---|---|---|
 | 1 | 0.01 ETH | -- | 0.011 ETH |
 | 10 | 0.024 ETH | 0.024 ETH | 0.026 ETH |
@@ -427,7 +425,7 @@ contract SimplePyramid {
 }
 ```
 
-*SimplePyramid contract (267 lines)*
+*SimplePyramid contract*
 
 <a id="lst:simple-pyramid"></a>
 
@@ -435,9 +433,7 @@ contract SimplePyramid {
 
 The pyramid structure requires each participant to recruit multiple others:
 
-| ccc@{}}
-
-**Level** | **People Required** | **Cumulative** |
+| **Level** | **People Required** | **Cumulative** |
 |---|---|---|
 | 0 (Creator) | 1 | 1 |
 | 1 | 3 | 4 |

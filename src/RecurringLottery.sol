@@ -168,8 +168,11 @@ contract RecurringLottery is
         round.completed = true;
         
         // Transfer payouts
-        payable(owner()).transfer(houseFee);
-        payable(round.winner).transfer(payout);
+        // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+        (bool feeSuccess, ) = payable(owner()).call{value: houseFee}("");
+        require(feeSuccess, "Fee transfer failed");
+        (bool paySuccess, ) = payable(round.winner).call{value: payout}("");
+        require(paySuccess, "Payout transfer failed");
         
         emit WinnerSelected(roundId, round.winner, payout);
         emit Rollover(roundId, rollover);

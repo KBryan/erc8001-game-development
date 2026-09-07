@@ -363,7 +363,7 @@ contract GameStaking is ReentrancyGuard, Ownable {
 
 ## Yield Integration with Morpho
 
-Morpho is a lending protocol optimizer that improves yields on Aave and Compound. Integrating Morpho allows games to generate passive income on treasury funds.
+Morpho is a standalone lending protocol built around Morpho Blue---minimal, isolated lending markets---with MetaMorpho vaults layered on top for curated yield. (Its original incarnation as an optimizer on Aave and Compound has been deprecated.) Integrating Morpho allows games to generate passive income on treasury funds. Note that the `IMorpho` interface below is a simplified illustrative interface, not the production ABI---integrators should build against Morpho's published contracts.
 
 ```solidity
 
@@ -802,9 +802,5 @@ contract LootBoxManager is ReentrancyGuard, Ownable {
 *LootBoxManager with entropy system*
 
 <a id="lst:lootbox"></a>
-
-## GameFi Architecture Diagram
-
-> **Figure**: Figure
 
 With the GameFi foundation established, Chapter 7 explores lottery systems with verifiable randomness.

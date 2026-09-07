@@ -8,7 +8,7 @@ A comprehensive guide to developing blockchain-based games using modern Ethereum
 
 ## Overview
 
-This book covers the complete journey of building games on Ethereum, from setting up your development environment to deploying production-grade GameFi applications. The 2024 edition represents a complete rewrite from the 2018 edition, incorporating:
+This book covers the complete journey of building games on Ethereum, from setting up your development environment to deploying production-grade GameFi applications. The 2026 edition represents a complete rewrite from the 2018 edition, incorporating:
 
 - **Foundry** as the primary development framework (replacing Truffle)
 - **Solidity 0.8.x** with built-in overflow protection and custom errors
@@ -17,9 +17,9 @@ This book covers the complete journey of building games on Ethereum, from settin
 - **DeFi integration** for yield-generating game mechanics
 - **Verifiable randomness** through oracle solutions
 
-## 2018 vs 2024: Key Differences
+## 2018 vs 2026: Key Differences
 
-| Feature | 2018 Edition | 2024 Edition |
+| Feature | 2018 Edition | 2026 Edition |
 |---------|-------------|--------------|
 | Solidity Version | 0.4.15–0.4.25 | 0.8.19+ |
 | Development Framework | Truffle Suite | Foundry |
@@ -41,6 +41,7 @@ This book covers the complete journey of building games on Ethereum, from settin
 8. **[Gambling Games](08-gambling.md)** - Provably fair gaming and betting contracts
 9. **[Production Deployment](09-deployment.md)** - Mainnet deployment, verification, and monitoring
 10. **[Advanced Testing](10-testing.md)** - Fuzzing, invariants, and integration testing
+11. **[ERC-8001 Multiplayer Coordination](11-erc8001-multiplayer.md)** - Signed-intent coordination for multiplayer games
 
 **[Appendix: Gas Optimization Reference](appendix-gas-reference.md)** - Quick reference for gas-efficient patterns
 
@@ -52,9 +53,18 @@ This book covers the complete journey of building games on Ethereum, from settin
 - `YieldManager.sol` - Treasury yield generation through Morpho
 - `LootBoxManager.sol` - Randomized rewards with Pyth Entropy
 - `PythPriceFeed.sol` - Price oracle integration
+- `GamingErrors.sol` - Shared custom error definitions for gaming contracts
+
+### ERC-8001 Coordination Contracts
+- `IAgentCoordination.sol` - ERC-8001 interface and shared types
+- `AgentCoordination.sol` - Reference implementation: EIP-712 intents, acceptances, lifecycle
+- `GameCoordination.sol` - Game-specific extension: tournaments, battles, team rewards
+- `MultiplayerGameLobby.sol` - Signed-intent lobbies with entry fees and winner payout
+- `TeamStaking.sol` - Team staking with locked periods and shared rewards
+- `ERC8001LootBox.sol` - Group loot boxes with Pyth Entropy randomness
 
 ### Lottery Contracts
-- `SimpleLottery.sol` - Basic lottery with manual winner selection
+- `SimpleLottery.sol` - Basic lottery with commit-reveal winner selection
 - `RecurringLottery.sol` - Automated recurring lottery rounds
 - `PowerballLottery.sol` - Multi-number lottery with progressive jackpots
 - `VRFUpgradedLottery.sol` - Chainlink VRF integration
@@ -64,7 +74,26 @@ This book covers the complete journey of building games on Ethereum, from settin
 - `Roulette.sol` - American roulette with multiple bet types
 
 ### Classic Pattern Examples (Educational)
+- `SimplePonzi.sol` - Classic Ponzi scheme mechanics (for analysis, not deployment)
+- `SimplePyramid.sol` - Classic pyramid scheme mechanics (for analysis, not deployment)
 - Tests demonstrating Ponzi and Pyramid mechanics
+
+## Building and Testing
+
+The book's code is a working Foundry project. Dependencies are vendored as git submodules, so clone with `--recurse-submodules`:
+
+```bash
+git clone --recurse-submodules <repo-url>
+cd erc8001-game-development
+
+# Build all contracts
+forge build
+
+# Run the test suite
+forge test
+```
+
+`ForkTest` requires a `MAINNET_RPC_URL` environment variable and is excluded from the default CI run. Continuous integration builds and tests every push via `.github/workflows/test.yml`.
 
 ## Converting to PDF
 
@@ -75,7 +104,7 @@ To generate a PDF from these Markdown files, use [Pandoc](https://pandoc.org/):
 sudo apt-get install pandoc texlive-full
 
 # Concatenate all chapters and convert
-pandoc README.md 01-introduction.md 02-foundry-setup.md        03-modern-solidity.md 04-security.md 05-ponzi-pyramid.md        06-gamefi.md 07-lotteries.md 08-gambling.md        09-deployment.md 10-testing.md appendix-gas-reference.md        -o ethereum-games-book.pdf        --pdf-engine=xelatex        -V geometry:margin=2.5cm        -V fontsize=11pt        --toc
+pandoc README.md 01-introduction.md 02-foundry-setup.md        03-modern-solidity.md 04-security.md 05-ponzi-pyramid.md        06-gamefi.md 07-lotteries.md 08-gambling.md        09-deployment.md 10-testing.md 11-erc8001-multiplayer.md appendix-gas-reference.md        -o ethereum-games-book.pdf        --pdf-engine=xelatex        -V geometry:margin=2.5cm        -V fontsize=11pt        --toc
 ```
 
 ## Prerequisites
@@ -99,9 +128,9 @@ pandoc README.md 01-introduction.md 02-foundry-setup.md        03-modern-solidit
 
 ## License
 
-© 2024 Blockchain Gaming Research Group. All rights reserved.
+© 2026 Blockchain Gaming Research Group. All rights reserved.
 
-ISBN: 978-0-0000000-0-0
+ISBN: pending
 
 ---
 

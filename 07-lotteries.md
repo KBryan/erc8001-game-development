@@ -180,8 +180,11 @@ contract SimpleLottery is ReentrancyGuard, Ownable {
         uint256 payout = pot - houseFee;
         
         paid = true;
-        payable(owner()).transfer(houseFee);
-        payable(winner).transfer(payout);
+        // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+        (bool feeSuccess, ) = payable(owner()).call{value: houseFee}("");
+        require(feeSuccess, "Fee transfer failed");
+        (bool paySuccess, ) = payable(winner).call{value: payout}("");
+        require(paySuccess, "Payout transfer failed");
         
         emit WinnerDrawn(winner, payout, winningNumber);
     }
@@ -423,8 +426,11 @@ contract RecurringLottery is
         round.completed = true;
         
         // Transfer payouts
-        payable(owner()).transfer(houseFee);
-        payable(round.winner).transfer(payout);
+        // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+        (bool feeSuccess, ) = payable(owner()).call{value: houseFee}("");
+        require(feeSuccess, "Fee transfer failed");
+        (bool paySuccess, ) = payable(round.winner).call{value: payout}("");
+        require(paySuccess, "Payout transfer failed");
         
         emit WinnerSelected(roundId, round.winner, payout);
         emit Rollover(roundId, rollover);
@@ -666,7 +672,9 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         uint256 prize = draw.prizeTiers[tier] / draw.tierWinners[tier];
 
         ticket.claimed = true;
-        payable(msg.sender).transfer(prize);
+        // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+        (bool success, ) = payable(msg.sender).call{value: prize}("");
+        require(success, "Prize transfer failed");
 
         emit PrizeClaimed(ticket.drawId, msg.sender, tier, prize);
     }
@@ -688,7 +696,8 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         }
         require(amount > 0, "Nothing to withdraw");
 
-        payable(owner()).transfer(amount);
+        (bool success, ) = payable(owner()).call{value: amount}("");
+        require(success, "Withdraw transfer failed");
     }
 
     /**
@@ -801,6 +810,8 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
 
 For production use, integrate Chainlink VRF for verifiable randomness.
 
+> **Version note.** This example targets Chainlink VRF v2; the current release is VRF v2.5, which replaces `VRFConsumerBaseV2` with `VRFConsumerBaseV2Plus`, widens subscription IDs from `uint64` to `uint256`, and adds the option to pay fees in native ETH instead of LINK. The migration is mechanical---the request/fulfill flow shown here is unchanged.
+
 ```solidity
 
 // SPDX-License-Identifier: MIT
@@ -908,9 +919,7 @@ contract VRFUpgradedLottery is VRFConsumerBaseV2 {
 
 ## Lottery Security Checklist
 
-| p{6cm}p{8cm}@{}}
-
-**Requirement** | **Implementation** |
+| **Requirement** | **Implementation** |
 |---|---|
 | Verifiable randomness | Chainlink VRF or commit-reveal |
 | Front-running resistance | Commit-reveal pattern |

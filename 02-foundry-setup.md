@@ -8,8 +8,6 @@ Foundry is a blazing fast, portable, and modular toolkit for Ethereum applicatio
 
 The transition from Truffle to Foundry is not merely incremental---it's transformational:
 
-| p{4cm}p{5cm}p{5cm}@{}}
-
 **Aspect** | **Truffle** | **Foundry** |
 |---|---|---|
 | Test Language | JavaScript | Solidity |
@@ -85,16 +83,19 @@ libs = ["lib"]
 solc = "0.8.19"
 optimizer = true
 optimizer_runs = 200
+verbosity = 3
 
 # Gas reporting
 gas_reports = ["*"]
-gas_reports_ignore = []
 
-# Testing
-fuzz_runs = 1000
-fuzz_max_local_rejects = 1024
-fuzz_max_global_rejects = 65536
-verbosity = 3
+# Fuzz testing
+[fuzz]
+runs = 1000
+
+# Invariant testing
+[invariant]
+runs = 128
+depth = 15
 
 # Etherscan verification
 [etherscan]
@@ -229,8 +230,6 @@ function testFuzz_Invest(uint256 amount) public {
 
 Cheat codes enable powerful testing capabilities:
 
-| p{5cm}p{8cm}@{}}
-
 **Cheat Code** | **Description** |
 |---|---|
 | `vm.prank(address)` | Execute next call as specified address |
@@ -332,7 +331,7 @@ Foundry uses git submodules for dependency management:
 forge install OpenZeppelin/openzeppelin-contracts
 
 # Install specific version
-forge install OpenZeppelin/openzeppelin-contracts@v4.9.3
+forge install OpenZeppelin/openzeppelin-contracts@v4.9.6
 
 # Update dependencies
 forge update
@@ -342,6 +341,8 @@ forge remove openzeppelin-contracts
 ```
 
 *Dependency management with Forge*
+
+> **Version note**: This book pins OpenZeppelin v4.9.x. OpenZeppelin v5 moved `ReentrancyGuard` and `Pausable` from `contracts/security/` to `contracts/utils/`, and `Ownable`'s constructor now takes an `initialOwner` argument. Readers using v5 must adjust imports and constructors accordingly.
 
 Remappings in `foundry.toml` map imports to installed dependencies:
 

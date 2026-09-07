@@ -8,13 +8,12 @@ Deploying gaming contracts to production requires careful planning across multip
 
 ### Ethereum Mainnet vs Layer-2
 
-| lccc@{}}
-
-**Factor** | **Ethereum** | **Base** | **Arbitrum** |
+| **Factor** | **Ethereum** | **Base** | **Arbitrum** |
 |---|---|---|---|
-| Gas Cost (simple tx) | \$5--50 | \$0.01--0.10 | \$0.10--0.50 |
+| Gas Cost (simple tx) | $5--50 | $0.01--0.10 | $0.10--0.50 |
 | Block Time | 12 sec | 2 sec | 0.25 sec |
-| Finality | 15 min | 15 min | 7 days |
+| Soft Confirmation | ~15 min (finality) | seconds | seconds |
+| Withdrawal Finality | N/A | ~7 days (challenge window) | ~7 days (challenge window) |
 | TVL Security | Highest | High | High |
 | Ecosystem Maturity | Maximum | Growing | Mature |
 | Bridge Risk | N/A | Canonical | Canonical |
@@ -27,7 +26,7 @@ Gaming contracts require frequent, low-value transactions:
 - Claiming rewards
 - In-game purchases
 
-With Ethereum mainnet gas costs at 20--100 gwei, a simple bet costing 50,000 gas would cost \$2--10. On Base, the same transaction costs under \$0.01.
+With Ethereum mainnet gas costs at 20--100 gwei, a simple bet costing 50,000 gas would cost $2--10. On Base, the same transaction costs under $0.01.
 
 ## Foundry Deployment Scripts
 
@@ -151,11 +150,11 @@ contract DeployGameFi is Script {
 # foundry.toml - Base configuration
 [rpc_endpoints]
 base = "${BASE_RPC_URL}"
-base_goerli = "https://goerli.base.org"
+base_sepolia = "https://sepolia.base.org"
 
 [etherscan]
 base = { key = "${BASESCAN_API_KEY}", url = "https://api.basescan.org/api" }
-base_goerli = { key = "${BASESCAN_API_KEY}", url = "https://api-goerli.basescan.org/api" }
+base_sepolia = { key = "${BASESCAN_API_KEY}", url = "https://api-sepolia.basescan.org/api" }
 ```
 
 *Base network configuration*
@@ -170,7 +169,7 @@ export BASESCAN_API_KEY="your-api-key"
 export PRIVATE_KEY="0x..."
 
 # Deploy to Base
-cd /root/ethereum-games-book
+cd ethereum-games-book
 forge script script/DeployGameFi.s.sol:DeployGameFi \
     --rpc-url base \
     --broadcast \
@@ -378,7 +377,7 @@ const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
 
 // Monitor for large bets
 contract.on("BetPlaced", (commitHash, player, amount, target, payout) => {
-    if (ethers.formatEther(amount) > "10") {
+    if (amount > ethers.parseEther("10")) {
         console.log(`Large bet detected: ${player} bet ${amount}`);
         // Alert logic here
     }
@@ -401,13 +400,11 @@ contract.on("BetPlaced", (_, player) => {
 
 ## Deployment Checklist
 
-| p{1cm}p{6cm}p{7cm}@{}}
-
-**Step** | **Task** | **Verification** |
+| **Step** | **Task** | **Verification** |
 |---|---|---|
 | 1 | Run full test suite | `forge test --fork-url mainnet` |
 | 2 | Verify gas snapshots | `forge snapshot --diff` |
-| 3 | Deploy to testnet | Verify on Base Goerli/Arb Sepolia |
+| 3 | Deploy to testnet | Verify on Base Sepolia (chain id 84532)/Arb Sepolia |
 | 4 | Verify contract source | Etherscan/Basescan verification |
 | 5 | Test verified contract | Interact via block explorer |
 | 6 | Deploy to mainnet | Use hardware wallet for deployer |

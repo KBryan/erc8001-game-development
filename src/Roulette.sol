@@ -120,13 +120,15 @@ contract Roulette is ReentrancyGuard, Ownable {
             newSpin.bets.push(bets[i]);
         }
         
+        totalWagered += totalBet;
+
         // Pay out
         if (payout > 0) {
             totalPaid += payout;
-            payable(msg.sender).transfer(payout);
+            // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+            (bool success, ) = payable(msg.sender).call{value: payout}("");
+            require(success, "Payout transfer failed");
         }
-        
-        totalWagered += totalBet;
         
         emit SpinPlaced(msg.sender, spinId, totalBet);
         emit SpinResult(msg.sender, spinId, result, payout, isRed[result]);

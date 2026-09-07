@@ -182,7 +182,9 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         uint256 prize = draw.prizeTiers[tier] / draw.tierWinners[tier];
 
         ticket.claimed = true;
-        payable(msg.sender).transfer(prize);
+        // call over transfer: the 2300-gas stipend breaks smart-contract wallets
+        (bool success, ) = payable(msg.sender).call{value: prize}("");
+        require(success, "Prize transfer failed");
 
         emit PrizeClaimed(ticket.drawId, msg.sender, tier, prize);
     }
@@ -204,7 +206,8 @@ contract PowerballLottery is ReentrancyGuard, Ownable {
         }
         require(amount > 0, "Nothing to withdraw");
 
-        payable(owner()).transfer(amount);
+        (bool success, ) = payable(owner()).call{value: amount}("");
+        require(success, "Withdraw transfer failed");
     }
 
     /**
